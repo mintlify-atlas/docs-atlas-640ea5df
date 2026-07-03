@@ -90,7 +90,7 @@ Send a `session.update` event at any point during a connection to change the ses
 | `voice` | `string` | TTS voice identifier (passed to the active TTS backend). |
 | `turn_detection.type` | `string` | Must be `"server_vad"`. |
 | `turn_detection.interrupt_response` | `boolean` | When `true` (default), new user speech cancels an in-progress response. Set to `false` to disable barge-in. |
-| `audio_format` | `object` | Input and output PCM format. The server always resamples internally to 16 kHz. |
+| `audio` | `object` | Input and output audio format configuration (`audio.input.format` and `audio.output.format`). The server always resamples internally to 16 kHz. |
 
 ```json
 {
@@ -162,7 +162,7 @@ Client WebSocket
 
 <Steps>
   <Step title="Inbound audio">
-    `input_audio_buffer.append` carries base64 PCM. `RealtimeService` decodes it, resamples to 16 kHz, and splits it into 512-sample chunks that are placed on the VAD's `recv_audio_chunks_queue`.
+    `input_audio_buffer.append` carries base64 PCM. `RealtimeService` decodes it, resamples to 16 kHz, and splits it into 512-sample chunks that are placed on the VAD's `input_queue`.
   </Step>
   <Step title="Speech detection">
     VAD emits `speech_started` / `speech_stopped` events on `text_output_queue`. A full utterance's audio is forwarded to STT.
@@ -174,7 +174,7 @@ Client WebSocket
     The LLM generates text and optional tool calls. `LMOutputProcessor` forwards clean text to TTS and puts `assistant_text` + tool call dicts on `text_output_queue` for the router.
   </Step>
   <Step title="Outbound audio">
-    TTS writes PCM chunks to `send_audio_chunks_queue`. The router's async `_send_loop` drains both queues, encoding PCM chunks as `response.output_audio.delta` events and translating internal messages into protocol events.
+    TTS writes PCM chunks to `output_queue`. The router's async `_send_loop` drains both `output_queue` (audio) and `text_output_queue` (events), encoding PCM chunks as `response.output_audio.delta` events and translating internal messages into protocol events.
   </Step>
 </Steps>
 
@@ -192,16 +192,17 @@ curl http://localhost:8765/v1/pool
 
 ```json
 {
-  "size": 2,
-  "in_use": 1,
+  "size": 3,
+  "in_use": 2,
   "units": [
-    { "index": 0, "state": "active", "session_id": "session_abc123" },
-    { "index": 1, "state": "idle",   "session_id": null }
+    { "index": 0, "state": "active",   "session_id": "session_abc123" },
+    { "index": 1, "state": "draining", "session_id": "session_old456", "draining_for_s": 0.42 },
+    { "index": 2, "state": "idle",     "session_id": null }
   ]
 }
 ```
 
-A unit stays in the `"draining"` state (and is unavailable for new connections) until the `SESSION_END` sentinel propagates through the entire handler chain, ensuring no stale output from the previous session leaks to the next client.
+A unit stays in the `"draining"` state (and is unavailable for new connections) until the `SESSION_END` sentinel propagates through the entire handler chain, ensuring no stale output from the previous session leaks to the next client. The `draining_for_s` field shows how long the unit has been draining — useful for spotting stuck handlers.
 
 ## Interruption and barge-in
 

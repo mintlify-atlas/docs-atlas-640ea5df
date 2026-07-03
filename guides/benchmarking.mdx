@@ -1,7 +1,7 @@
 ---
-title: "Benchmark STT and TTS Pipeline Performance"
+title: "Benchmark STT and TTS Pipeline Performance on Device"
 sidebarTitle: "Benchmarking"
-description: "Measure latency, RTF, and time-to-first-chunk across STT and TTS handlers to pick the fastest backend for your hardware."
+description: "Measure latency, real-time factor, and time-to-first-chunk across STT and TTS handlers to pick the fastest backend for your hardware."
 ---
 
 The `scripts/` directory ships two standalone benchmark scripts — `benchmark_tts.py` and `benchmark_stt.py` — that measure handler performance independently of the full pipeline. Both scripts run multiple iterations, capture detailed timing statistics, print a sorted comparison table, and save results to a JSON file for further analysis.

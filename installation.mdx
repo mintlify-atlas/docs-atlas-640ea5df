@@ -67,11 +67,17 @@ pip install "speech-to-speech[kokoro]"
 # Pocket TTS from Kyutai Labs — streaming TTS with voice cloning
 pip install "speech-to-speech[pocket]"
 
+# ChatTTS — multilingual TTS
+pip install "speech-to-speech[chattts]"
+
 # Faster Whisper STT — CTranslate2-based Whisper for accelerated CPU/CUDA transcription
 pip install "speech-to-speech[faster-whisper]"
 
 # Paraformer STT — FunASR-based Paraformer for Mandarin and multilingual transcription
 pip install "speech-to-speech[paraformer]"
+
+# Lightning Whisper MLX STT — fast Whisper on Apple Silicon (macOS only)
+pip install "speech-to-speech[whisper-mlx]"
 
 # MLX LM — explicit MLX LLM backend (already bundled on macOS; use on macOS only)
 pip install "speech-to-speech[mlx-lm]"
@@ -92,8 +98,10 @@ The table below summarises each extra and when to use it:
 |---|---|---|
 | `[kokoro]` | `kokoro>=0.9.2` | Alternative TTS on Linux/Windows with high voice quality |
 | `[pocket]` | `pocket-tts>=0.1.0` | Streaming TTS with built-in voice cloning from Kyutai Labs |
+| `[chattts]` | `ChatTTS>=0.1.1` | Multilingual TTS with ChatTTS |
 | `[faster-whisper]` | `faster-whisper>=1.0.3` | CTranslate2 Whisper for fast CPU or CUDA STT |
 | `[paraformer]` | `funasr`, `modelscope`, `onnxruntime` | FunASR Paraformer for Mandarin-primary transcription |
+| `[whisper-mlx]` | `lightning-whisper-mlx>=0.0.10` | Lightning Whisper MLX for fast Whisper on Apple Silicon (macOS only) |
 | `[mlx-lm]` | `mlx-lm==0.31.1`, `mlx-vlm` (macOS only) | Explicit MLX LM install on macOS |
 | `[websocket]` | `websockets>=12.0` | Explicit websockets install for `--mode websocket` |
 

@@ -21,16 +21,24 @@ The Language Model stage is the most compute-intensive component in the pipeline
 
 These flags apply across all four backends:
 
-<ParamField path="--model_name" type="str" default="Qwen/Qwen3-4B-Instruct-2507">
-  The model to load or the model ID to send to the API. For local backends this is a Hugging Face Hub model ID or a local path; for API backends it is the model string the provider expects (e.g. `gpt-4o-mini`, `gpt-5.4-mini`).
+<ParamField path="--model_name" type="str" default="Qwen/Qwen3-4B-Instruct-2507 (transformers/mlx-lm) or gpt-5.4-mini (responses-api/chat-completions)">
+  The model to load or the model ID to send to the API. For local backends this is a Hugging Face Hub model ID or a local path; for API backends it is the model string the provider expects (e.g. `gpt-4o-mini`, `gpt-5.4-mini`). The `responses-api` and `chat-completions` backends override the default to `gpt-5.4-mini`.
 </ParamField>
 
 <ParamField path="--chat_size" type="int" default="30">
   Number of assistant–user turn pairs to keep in the rolling context window. When the chat exceeds this size, older turns are compacted (summarised) in the background by `compact_history`.
 </ParamField>
 
+<ParamField path="--init_chat_role" type="str" default="system">
+  The role assigned to the initial chat message (system prompt). Default is `system`.
+</ParamField>
+
 <ParamField path="--init_chat_prompt" type="str" default="You are a helpful and friendly AI assistant. You are polite, respectful, and aim to provide concise responses of less than 20 words.">
   The system prompt injected at the start of every conversation. Override this to change the assistant's persona or behaviour.
+</ParamField>
+
+<ParamField path="--user_role" type="str" default="user">
+  The role label assigned to user turns in the chat history. Default is `user`.
 </ParamField>
 
 <ParamField path="--enable_lang_prompt" type="bool" default="False">

@@ -608,8 +608,8 @@ The table below shows the typical sequence of events for a complete VAD-triggere
 | # | Direction | Event |
 |---|---|---|
 | 1 | Server → Client | `input_audio_buffer.speech_started` |
-| 2 | Server → Client | `conversation.item.input_audio_transcription.delta` *(repeated)* |
-| 3 | Server → Client | `input_audio_buffer.speech_stopped` |
+| 2 | Server → Client | `input_audio_buffer.speech_stopped` |
+| 3 | Server → Client | `conversation.item.input_audio_transcription.delta` *(repeated)* |
 | 4 | Server → Client | `conversation.item.input_audio_transcription.completed` |
 | 5 | Server → Client | `response.created` |
 | 6 | Server → Client | `response.output_audio.delta` *(repeated)* |

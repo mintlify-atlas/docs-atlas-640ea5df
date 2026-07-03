@@ -80,8 +80,11 @@ Loads any Whisper-compatible checkpoint from the Hugging Face Hub via the Transf
 | `--stt_device` | `cuda` | Device: `cuda`, `cpu`, `mps` |
 | `--stt_torch_dtype` | `float16` | Precision: `float16`, `bfloat16`, `float32` |
 | `--stt_compile_mode` | `None` | `torch.compile` mode: `default`, `reduce-overhead`, `max-autotune` |
-| `--language` | `en` | Language code or `auto` for detection |
 | `--stt_gen_max_new_tokens` | `128` | Maximum tokens to generate |
+| `--stt_gen_num_beams` | `1` | Number of beams for beam search; `1` = greedy decoding |
+| `--stt_gen_return_timestamps` | `False` | Whether to return timestamps with transcriptions |
+| `--stt_gen_task` | `transcribe` | Task to perform; typically `transcribe` |
+| `--language` | `en` | Language code or `auto` for detection |
 
 Language detection reads the `<\|lang\|>` token from the generated IDs. If the detected language is outside the supported list, the handler falls back to the last known language.
 
@@ -144,6 +147,13 @@ Language detection falls back to the last supported language when the model retu
 
 Uses [mlx-audio](https://github.com/huggingface/mlx-audio) for Whisper inference on Apple Silicon. Model is controlled by `--mlx_audio_whisper_model_name`; language detection still uses the shared `--language` flag.
 
+**Key arguments:**
+
+| Argument | Default | Description |
+|---|---|---|
+| `--mlx_audio_whisper_model_name` | `mlx-community/whisper-large-v3-turbo` | MLX Audio Whisper model ID or local path |
+| `--mlx_audio_whisper_gen_kwargs` | `{}` | Additional generation kwargs passed to the model |
+
 <Tabs>
   <Tab title="Default">
     ```bash
@@ -174,6 +184,9 @@ Install: `pip install "speech-to-speech[faster-whisper]"`
 | `--faster_whisper_stt_compute_type` | `auto` | Quantization: `int8`, `float16`, `bfloat16`, `auto`, etc. |
 | `--faster_whisper_stt_gen_language` | `en` | Language code for transcription |
 | `--faster_whisper_stt_gen_max_new_tokens` | `128` | Max tokens to generate |
+| `--faster_whisper_stt_gen_beam_size` | `1` | Number of beams for beam search; `1` = greedy |
+| `--faster_whisper_stt_gen_return_timestamps` | `False` | Whether to return timestamps |
+| `--faster_whisper_stt_gen_task` | `transcribe` | Task to perform; typically `transcribe` |
 
 <Tabs>
   <Tab title="CUDA">

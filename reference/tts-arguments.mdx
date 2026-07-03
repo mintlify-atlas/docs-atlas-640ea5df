@@ -1,7 +1,7 @@
 ---
 title: "TTS Handler Arguments: Text-to-Speech Config"
 sidebarTitle: "TTS Args"
-description: "All TTS configuration flags for every backend: Qwen3-TTS, Kokoro-82M, Pocket TTS, ChatTTS, and Facebook MMS."
+description: "All TTS configuration flags for every backend: Qwen3-TTS, Kokoro-82M, Pocket TTS, ChatTTS, and Facebook MMS, with field names, defaults, and prefixes."
 ---
 
 The TTS stage converts text tokens from the LLM into audio streamed back to the client. Five backends are available, selected via `--tts <value>` on [ModuleArguments](/reference/module-arguments). Each backend uses its own flag prefix so all argument classes can coexist in the same namespace.

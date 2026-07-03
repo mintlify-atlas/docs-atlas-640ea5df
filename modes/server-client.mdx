@@ -31,10 +31,13 @@ Server/Client mode splits the pipeline across two processes: the server runs VAD
 Bind both sockets to all interfaces so the client can reach them from any IP:
 
 ```bash
-speech-to-speech --recv_host 0.0.0.0 --send_host 0.0.0.0
+speech-to-speech \
+    --mode socket \
+    --recv_host 0.0.0.0 \
+    --send_host 0.0.0.0
 ```
 
-This implicitly uses `--mode socket`. The mode argument can also be given explicitly:
+The default mode is `realtime`, so `--mode socket` must be given explicitly. All four port and host flags can be specified together:
 
 ```bash
 speech-to-speech \
@@ -95,6 +98,7 @@ The client streams at the same 16 kHz rate. The server's `SocketReceiver` calls 
     ```bash
     # Server
     speech-to-speech \
+        --mode socket \
         --recv_host 0.0.0.0 \
         --send_host 0.0.0.0 \
         --llm_backend responses-api \
@@ -110,6 +114,7 @@ The client streams at the same 16 kHz rate. The server's `SocketReceiver` calls 
     ```bash
     # Server
     speech-to-speech \
+        --mode socket \
         --recv_host 0.0.0.0 \
         --send_host 0.0.0.0 \
         --llm_backend chat-completions \
@@ -123,8 +128,9 @@ The client streams at the same 16 kHz rate. The server's `SocketReceiver` calls 
   </Tab>
   <Tab title="Transformers (CUDA)">
     ```bash
-    # Server — with Torch Compile for Whisper
+    # Server
     speech-to-speech \
+        --mode socket \
         --recv_host 0.0.0.0 \
         --send_host 0.0.0.0 \
         --stt parakeet-tdt \

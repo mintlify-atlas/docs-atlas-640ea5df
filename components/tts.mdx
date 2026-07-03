@@ -59,6 +59,14 @@ pip install speech-to-speech
   Device for inference: `cuda`, `cpu`, `mps`, `auto`. On Apple Silicon the mlx-audio backend is selected automatically regardless of this flag.
 </ParamField>
 
+<ParamField path="--qwen3_tts_dtype" type="str" default="auto">
+  Data type for inference: `auto`, `float16`, `bfloat16`, `float32`. Default is `auto`.
+</ParamField>
+
+<ParamField path="--qwen3_tts_attn_implementation" type="str" default="eager">
+  Attention implementation: `eager`, `flash_attention_2`, `sdpa`. Use `eager` on Jetson and other edge devices. Default is `eager`.
+</ParamField>
+
 <ParamField path="--qwen3_tts_backend" type="str" default="ggml">
   faster-qwen3-tts backend on non-macOS platforms: `ggml` or `torch`. `ggml` uses the GGML quantized kernel (default); `torch` uses the CUDA-graphs PyTorch path. Ignored on Apple Silicon.
 </ParamField>
@@ -75,6 +83,22 @@ pip install speech-to-speech
   Path to a reference audio file for voice cloning. Leave unset when using a CustomVoice or VoiceDesign model.
 </ParamField>
 
+<ParamField path="--qwen3_tts_ref_text" type="str" default="(built-in sample text)">
+  Transcription of the reference audio for voice cloning. Only used when `--qwen3_tts_ref_audio` is set.
+</ParamField>
+
+<ParamField path="--qwen3_tts_instruct" type="str" default="None">
+  Instruction text for VoiceDesign models. Required when using a voice design model; leave unset for CustomVoice or voice cloning.
+</ParamField>
+
+<ParamField path="--qwen3_tts_xvec_only" type="bool" default="False">
+  Use x-vector only voice cloning mode. Recommended for cleaner starts and language switching when doing voice cloning.
+</ParamField>
+
+<ParamField path="--qwen3_tts_parity_mode" type="bool" default="False">
+  Disable the CUDA-graph streaming path and use parity mode for stability. Useful for debugging or on hardware where CUDA graphs cause issues.
+</ParamField>
+
 <ParamField path="--qwen3_tts_mlx_quantization" type="str" default="6bit">
   MLX quantization variant on Apple Silicon: `bf16`, `4bit`, `6bit`, or `8bit`. Defaults to `6bit` for a good quality/speed balance.
 </ParamField>
@@ -89,6 +113,10 @@ pip install speech-to-speech
 
 <ParamField path="--qwen3_tts_streaming_chunk_size" type="int" default="None">
   Codec steps per streaming chunk. When unset, defaults to `8` on `faster-qwen3-tts` and `4` on mlx-audio.
+</ParamField>
+
+<ParamField path="--qwen3_tts_blocksize" type="int" default="512">
+  Audio chunk size in samples for streaming output. Must match the `LocalAudioStreamer` blocksize. Default is 512.
 </ParamField>
 
 <Tabs>
@@ -246,6 +274,10 @@ Install: `pip install "speech-to-speech[kokoro]"`
   Speech speed multiplier. Values above 1.0 speed up; values below 1.0 slow down.
 </ParamField>
 
+<ParamField path="--kokoro_blocksize" type="int" default="512">
+  Audio chunk size in samples for streaming output. Default is 512.
+</ParamField>
+
 <Tabs>
   <Tab title="British English">
     ```bash
@@ -309,6 +341,13 @@ Install: `pip install "speech-to-speech[kokoro]"`
 `FacebookMMSTTSHandler` uses Meta's Massively Multilingual Speech (MMS) TTS models. It maps STT language codes (e.g. `en`, `fr`, `es`) to MMS model suffixes (e.g. `eng`, `fra`, `spa`) and reloads the model automatically on language changes. Use this backend for multilingual pipelines where the TTS must match the user's language.
 
 Arguments use the `--facebook_mms_*` prefix. The TTS language is set with `--tts_language`.
+
+| Argument | Default | Description |
+|---|---|---|
+| `--facebook_mms_model_name` | `facebook/mms-tts-eng` | HuggingFace model ID for the MMS TTS model |
+| `--tts_language` | `en` | Language code for synthesis (e.g. `en`, `fr`, `es`) |
+| `--facebook_mms_device` | `cuda` | Device for inference |
+| `--facebook_mms_torch_dtype` | `float32` | Precision: `float32`, `float16`, `bfloat16` |
 
 <Tabs>
   <Tab title="English">

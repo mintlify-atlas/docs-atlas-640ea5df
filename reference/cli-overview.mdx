@@ -1,5 +1,5 @@
 ---
-title: "speech-to-speech CLI Command Reference"
+title: "speech-to-speech CLI: Complete Command Reference"
 sidebarTitle: "CLI Overview"
 description: "Complete reference for all speech-to-speech CLI flags, how argument classes group them, and patterns like gen_kwargs prefixes and JSON file input."
 ---
@@ -64,7 +64,7 @@ Because multiple STT, LLM, and TTS backends can coexist in the argument namespac
 
 ## The `gen_kwargs` pattern
 
-Any generation parameter not explicitly listed in an argument class can still be passed at runtime using the `<handler_prefix>_gen_<param>` pattern:
+Generation parameters follow the `<handler_prefix>_gen_<param>` naming convention. At parse time the pipeline strips the handler prefix and collects every `gen_`-prefixed field into a `gen_kwargs` dict that is forwarded directly to the underlying model's `generate()` call:
 
 ```bash
 # Cap Whisper transcription length
@@ -77,11 +77,11 @@ speech-to-speech --llm_gen_temperature 0.7
 speech-to-speech --stt_gen_num_beams 4
 ```
 
-These extra `gen_kwargs` are forwarded directly to the underlying model's `generate()` call, so any parameter supported by the model's generation config is valid.
+Only fields that are explicitly declared in the corresponding argument dataclass are accepted as CLI flags. Refer to each backend's section in [STT Args](/reference/stt-arguments) or [LLM Args](/reference/llm-arguments) for the full list of supported `gen_*` parameters.
 
 ## Passing arguments from a JSON file
 
-When the first positional argument ends in `.json`, the CLI reads flags from that file instead of the shell:
+When the JSON config file is the **only** argument (no other CLI flags), the CLI reads configuration from that file instead of the shell:
 
 ```json
 {

@@ -1,7 +1,7 @@
 ---
-title: "Optimize Speech to Speech for Apple Silicon"
+title: "Optimize Speech-to-Speech Pipeline for Apple Silicon"
 sidebarTitle: "Apple Silicon"
-description: "Run the full pipeline natively on macOS using MLX-backed STT, LLM, and TTS for low-latency, GPU-accelerated voice conversations."
+description: "Run the full pipeline natively on macOS using MLX-backed STT, LLM, and TTS for low-latency, GPU-accelerated local voice conversations."
 ---
 
 Apple Silicon Macs ship with a unified memory architecture that MLX is purpose-built to exploit. By routing the STT, LLM, and TTS stages entirely through the Metal Performance Shaders (MPS) device and the `mlx-audio` / `mlx-lm` libraries, you can run a fully local, low-latency voice agent without any cloud dependency or CUDA hardware.
@@ -36,8 +36,7 @@ speech-to-speech \
     --tts qwen3 \
     --qwen3_tts_mlx_quantization 6bit \
     --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
-    --mode local \
-    --enable_live_transcription
+    --mode local
 ```
 
 You can pin a specific LLM while keeping everything else from the shortcut:

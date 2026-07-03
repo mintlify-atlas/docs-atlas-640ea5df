@@ -1,7 +1,7 @@
 ---
 title: "STT Handler Arguments: Speech-to-Text Config"
 sidebarTitle: "STT Args"
-description: "All STT configuration flags for every backend: Whisper, Faster-Whisper, Parakeet TDT, Paraformer, and MLX Audio Whisper."
+description: "All STT configuration flags for every backend: Whisper, Faster-Whisper, Parakeet TDT, Paraformer, and MLX Audio Whisper, with field names and defaults."
 ---
 
 The STT stage converts raw audio frames into text that is forwarded to the LLM. Five backends are available, each selected via `--stt <value>` on [ModuleArguments](/reference/module-arguments). Every backend uses its own flag prefix so that all argument classes can coexist in the same namespace.
