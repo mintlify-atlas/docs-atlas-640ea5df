@@ -1,0 +1,134 @@
+---
+title: "speech-to-speech CLI Command Reference"
+sidebarTitle: "CLI Overview"
+description: "Complete reference for all speech-to-speech CLI flags, how argument classes group them, and patterns like gen_kwargs prefixes and JSON file input."
+---
+
+The `speech-to-speech` package exposes a single command-line entrypoint — `speech-to-speech` — that starts the full VAD → STT → LLM → TTS pipeline. The same pipeline can also be launched via the Python module form:
+
+```bash
+python -m speech_to_speech.s2s_pipeline
+```
+
+All configuration is passed as CLI flags. Running with `-h` prints the full reference:
+
+```bash
+speech-to-speech -h
+```
+
+## Argument groups
+
+Every flag belongs to one of the argument classes below. Each class is parsed independently and covers one stage or concern of the pipeline:
+
+| Argument class | Reference page | Scope |
+|---|---|---|
+| `ModuleArguments` | [Module Args](/reference/module-arguments) | Top-level mode, backend selection, live transcription |
+| `VADHandlerArguments` | [VAD Args](/reference/vad-arguments) | Silero VAD v5 sensitivity, timing, and audio enhancement |
+| `WhisperSTTHandlerArguments` | [STT Args](/reference/stt-arguments) | Whisper (`--stt whisper`) |
+| `FasterWhisperSTTHandlerArguments` | [STT Args](/reference/stt-arguments) | Faster-Whisper (`--stt faster-whisper`) |
+| `ParakeetTDTSTTHandlerArguments` | [STT Args](/reference/stt-arguments) | Parakeet TDT (`--stt parakeet-tdt`) |
+| `ParaformerSTTHandlerArguments` | [STT Args](/reference/stt-arguments) | Paraformer / FunASR (`--stt paraformer`) |
+| `MLXAudioWhisperSTTHandlerArguments` | [STT Args](/reference/stt-arguments) | MLX Audio Whisper (`--stt mlx-audio-whisper`) |
+| `LanguageModelBaseArguments` | [LLM Args](/reference/llm-arguments) | Shared model name, chat history, system prompt |
+| `LanguageModelHandlerArguments` | [LLM Args](/reference/llm-arguments) | Transformers / mlx-lm local backends |
+| `ResponsesApiLanguageModelHandlerArguments` | [LLM Args](/reference/llm-arguments) | OpenAI Responses API backend |
+| `ChatCompletionsLanguageModelHandlerArguments` | [LLM Args](/reference/llm-arguments) | OpenAI Chat Completions backend |
+| `Qwen3TTSHandlerArguments` | [TTS Args](/reference/tts-arguments) | Qwen3-TTS (`--tts qwen3`) |
+| `KokoroTTSHandlerArguments` | [TTS Args](/reference/tts-arguments) | Kokoro-82M (`--tts kokoro`) |
+| `PocketTTSHandlerArguments` | [TTS Args](/reference/tts-arguments) | Pocket TTS (`--tts pocket`) |
+| `ChatTTSHandlerArguments` | [TTS Args](/reference/tts-arguments) | ChatTTS (`--tts chatTTS`) |
+| `FacebookMMSTTSHandlerArguments` | [TTS Args](/reference/tts-arguments) | Facebook MMS (`--tts facebookMMS`) |
+| `SocketReceiverArguments` | [Connection Args](/reference/connection-arguments) | TCP socket receiver |
+| `SocketSenderArguments` | [Connection Args](/reference/connection-arguments) | TCP socket sender |
+| `WebSocketStreamerArguments` | [Connection Args](/reference/connection-arguments) | WebSocket streamer |
+
+## Flag prefix system
+
+Because multiple STT, LLM, and TTS backends can coexist in the argument namespace, each backend's flags are namespaced by a prefix:
+
+| Backend | CLI prefix | Example |
+|---|---|---|
+| Whisper (Transformers) | `--stt_` | `--stt_model_name openai/whisper-large-v3` |
+| Faster-Whisper | `--faster_whisper_stt_` | `--faster_whisper_stt_model_name large-v3` |
+| Parakeet TDT | `--parakeet_tdt_` | `--parakeet_tdt_device mps` |
+| Paraformer | `--paraformer_stt_` | `--paraformer_stt_model_name paraformer-zh` |
+| MLX Audio Whisper | `--mlx_audio_whisper_` | `--mlx_audio_whisper_model_name mlx-community/whisper-large-v3-turbo` |
+| Local LLM (transformers/mlx-lm) | `--llm_` | `--llm_device cuda` |
+| Shared LLM (all backends) | *(no prefix)* | `--model_name gpt-4o-mini` |
+| Responses API / Chat Completions | `--responses_api_` | `--responses_api_base_url http://localhost:8000/v1` |
+| Qwen3-TTS | `--qwen3_tts_` | `--qwen3_tts_speaker Aiden` |
+| Kokoro TTS | `--kokoro_` | `--kokoro_voice bm_fable` |
+| Pocket TTS | `--pocket_tts_` | `--pocket_tts_voice jean` |
+| ChatTTS | `--chat_tts_` | `--chat_tts_device cuda` |
+| Facebook MMS | `--facebook_mms_` | `--facebook_mms_device cuda` |
+
+## The `gen_kwargs` pattern
+
+Any generation parameter not explicitly listed in an argument class can still be passed at runtime using the `<handler_prefix>_gen_<param>` pattern:
+
+```bash
+# Cap Whisper transcription length
+speech-to-speech --stt_gen_max_new_tokens 128
+
+# Sample from the LLM at temperature 0.7
+speech-to-speech --llm_gen_temperature 0.7
+
+# Use beam search for Whisper
+speech-to-speech --stt_gen_num_beams 4
+```
+
+These extra `gen_kwargs` are forwarded directly to the underlying model's `generate()` call, so any parameter supported by the model's generation config is valid.
+
+## Passing arguments from a JSON file
+
+When the first positional argument ends in `.json`, the CLI reads flags from that file instead of the shell:
+
+```json
+{
+  "stt": "parakeet-tdt",
+  "llm_backend": "responses-api",
+  "tts": "qwen3",
+  "model_name": "gpt-4o-mini",
+  "responses_api_stream": true,
+  "enable_live_transcription": true
+}
+```
+
+```bash
+speech-to-speech my_config.json
+```
+
+This is useful for reproducible experiment configs and deployment scripts.
+
+## Default command and its full expansion
+
+Running `speech-to-speech` with no arguments starts the realtime server with Parakeet TDT, the OpenAI Responses API, and Qwen3-TTS. The short form:
+
+```bash
+speech-to-speech
+```
+
+Is exactly equivalent to:
+
+```bash
+speech-to-speech \
+    --thresh 0.6 \
+    --stt parakeet-tdt \
+    --llm_backend responses-api \
+    --tts qwen3 \
+    --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+    --qwen3_tts_speaker Aiden \
+    --qwen3_tts_language auto \
+    --qwen3_tts_backend ggml \
+    --qwen3_tts_non_streaming_mode True \
+    --qwen3_tts_mlx_quantization 6bit \
+    --model_name gpt-5.4-mini \
+    --chat_size 30 \
+    --responses_api_stream \
+    --enable_live_transcription \
+    --mode realtime
+```
+
+<Note>
+  The default command requires `OPENAI_API_KEY` to be set in your environment, or the key passed explicitly via `--responses_api_api_key`. For non-OpenAI providers also set `--responses_api_base_url`.
+</Note>

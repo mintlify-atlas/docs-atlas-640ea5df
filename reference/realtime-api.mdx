@@ -1,0 +1,338 @@
+---
+title: "OpenAI Realtime-Compatible WebSocket API"
+sidebarTitle: "Realtime API"
+description: "The /v1/realtime WebSocket endpoint, session config, and pipeline architecture for running a local OpenAI Realtime-compatible voice server."
+---
+
+The speech-to-speech server implements the [OpenAI Realtime protocol](https://platform.openai.com/docs/guides/realtime) at `/v1/realtime`, so any client built against that API — including the official `openai` Python SDK and compatible web clients — connects without modification. The server listens on `0.0.0.0:8765` by default and handles everything from VAD and STT through LLM generation and TTS entirely on-device, with no outbound API calls unless you choose a remote LLM backend.
+
+<Note>
+  The default port is **8765**. Pass `--port` to override it. Any OpenAI Realtime-compatible client can connect — the Python SDK, browser `WebSocket`, or third-party SDKs that target the same wire protocol all work without changes.
+</Note>
+
+## Connecting with the OpenAI Python client
+
+Because the server speaks the OpenAI Realtime wire protocol, you can point the official Python client at it by overriding `base_url`:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8765/v1", api_key="not-needed")
+
+with client.beta.realtime.connect(model="model_name") as conn:
+    conn.session.update(
+        session={
+            "instructions": "You are a helpful voice assistant.",
+            "turn_detection": {
+                "type": "server_vad",
+                "interrupt_response": True,
+            },
+        }
+    )
+    # Stream audio, receive responses …
+```
+
+The `api_key` value is ignored by the local server but must be a non-empty string to satisfy the SDK's validation. The `model` parameter in `connect()` is recorded and logged but has no effect on which models are actually used — those are controlled by the CLI flags you pass when starting the server.
+
+## Starting the server
+
+<Tabs>
+  <Tab title="Local LLM (Transformers)">
+    ```bash
+    python s2s_pipeline.py \
+      --mode realtime \
+      --stt parakeet-tdt \
+      --llm_backend transformers \
+      --tts kokoro \
+      --model_name "Qwen/Qwen3-4B-Instruct-2507" \
+      --llm_device mps \
+      --llm_torch_dtype float16 \
+      --enable_live_transcription
+    ```
+  </Tab>
+  <Tab title="Local LLM (MLX-LM)">
+    ```bash
+    python s2s_pipeline.py \
+      --mode realtime \
+      --stt parakeet-tdt \
+      --llm_backend mlx-lm \
+      --tts kokoro \
+      --model_name "mlx-community/Qwen3-4B-Instruct-2507-bf16" \
+      --llm_device mps \
+      --llm_torch_dtype float16 \
+      --enable_live_transcription
+    ```
+  </Tab>
+  <Tab title="Remote LLM (OpenAI-compatible API)">
+    ```bash
+    python s2s_pipeline.py \
+      --mode realtime \
+      --stt parakeet-tdt \
+      --llm_backend responses-api \
+      --tts kokoro \
+      --model_name "openai/gpt-oss-20b:groq" \
+      --responses_api_base_url "https://router.huggingface.co/v1" \
+      --responses_api_api_key "$HF_TOKEN" \
+      --responses_api_stream \
+      --enable_live_transcription
+    ```
+  </Tab>
+</Tabs>
+
+## Session configuration (`session.update`)
+
+Send a `session.update` event at any point during a connection to change the session configuration. The server performs a deep-merge, so only the fields you include are overwritten — unset fields retain their current values.
+
+| Field | Type | Description |
+|---|---|---|
+| `instructions` | `string` | System prompt injected at the start of every LLM context. |
+| `tools` | `array` | JSON Schema tool definitions. See [Tool calling](#tool-calling). |
+| `voice` | `string` | TTS voice identifier (passed to the active TTS backend). |
+| `turn_detection.type` | `string` | Must be `"server_vad"`. |
+| `turn_detection.interrupt_response` | `boolean` | When `true` (default), new user speech cancels an in-progress response. Set to `false` to disable barge-in. |
+| `audio_format` | `object` | Input and output PCM format. The server always resamples internally to 16 kHz. |
+
+```json
+{
+  "type": "session.update",
+  "session": {
+    "instructions": "You are a concise assistant. Reply in one sentence.",
+    "voice": "af_heart",
+    "turn_detection": {
+      "type": "server_vad",
+      "interrupt_response": true
+    },
+    "tools": [
+      {
+        "type": "function",
+        "name": "get_weather",
+        "description": "Return current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": { "type": "string", "description": "City name" }
+          },
+          "required": ["city"]
+        }
+      }
+    ]
+  }
+}
+```
+
+Session config is stored in a `RuntimeConfig` Pydantic model. VAD reads `turn_detection` thresholds, LLM reads `instructions` and `tools`, and TTS reads `voice` — all at processing time, so a `session.update` takes effect immediately for the next utterance.
+
+## Pipeline architecture
+
+Each connection is served by one isolated **PipelineUnit** drawn from a fixed pool. The unit owns its own queues and handler chain, so concurrent sessions never share state.
+
+```
+Client WebSocket
+       │
+       ▼
+  WebSocket Router          (FastAPI/uvicorn, async)
+       │  ▲
+       │  │  server events (JSON)
+       ▼  │
+  RealtimeService           (protocol ↔ pipeline translation)
+       │
+       ▼
+     VAD                    (Silero VAD — speech boundary detection)
+       │
+       ▼
+     STT                    (Parakeet TDT / Whisper / …)
+       │
+       ▼
+  TranscriptionNotifier     (taps transcript → transcription.delta / .completed)
+       │
+       ▼
+     LLM                    (transformers / mlx-lm / responses-api)
+       │
+       ▼
+  LMOutputProcessor         (splits clean text → TTS, tool dicts → Router)
+       │
+       ▼
+     TTS                    (Kokoro / Qwen3-TTS / …)
+       │
+       ▼
+  WebSocket Router          (encodes PCM → base64, sends response.output_audio.delta)
+```
+
+**Key data flows:**
+
+<Steps>
+  <Step title="Inbound audio">
+    `input_audio_buffer.append` carries base64 PCM. `RealtimeService` decodes it, resamples to 16 kHz, and splits it into 512-sample chunks that are placed on the VAD's `recv_audio_chunks_queue`.
+  </Step>
+  <Step title="Speech detection">
+    VAD emits `speech_started` / `speech_stopped` events on `text_output_queue`. A full utterance's audio is forwarded to STT.
+  </Step>
+  <Step title="Transcription">
+    STT output passes through `TranscriptionNotifier`, which emits `transcription.delta` and `transcription.completed` events before handing the transcript to the LLM.
+  </Step>
+  <Step title="LLM generation">
+    The LLM generates text and optional tool calls. `LMOutputProcessor` forwards clean text to TTS and puts `assistant_text` + tool call dicts on `text_output_queue` for the router.
+  </Step>
+  <Step title="Outbound audio">
+    TTS writes PCM chunks to `send_audio_chunks_queue`. The router's async `_send_loop` drains both queues, encoding PCM chunks as `response.output_audio.delta` events and translating internal messages into protocol events.
+  </Step>
+</Steps>
+
+## Concurrent sessions and the pipeline pool
+
+Start the server with `--num_pipelines N` to allow up to `N` simultaneous connections. Each pipeline unit in the pool is completely isolated — separate queues, separate handler instances, separate `RealtimeService`.
+
+When all units are busy, new connections receive a `session_limit_reached` error event and are immediately closed with WebSocket code `1008`.
+
+You can inspect pool state at runtime via the HTTP endpoint:
+
+```bash
+curl http://localhost:8765/v1/pool
+```
+
+```json
+{
+  "size": 2,
+  "in_use": 1,
+  "units": [
+    { "index": 0, "state": "active", "session_id": "session_abc123" },
+    { "index": 1, "state": "idle",   "session_id": null }
+  ]
+}
+```
+
+A unit stays in the `"draining"` state (and is unavailable for new connections) until the `SESSION_END` sentinel propagates through the entire handler chain, ensuring no stale output from the previous session leaks to the next client.
+
+## Interruption and barge-in
+
+When `turn_detection.interrupt_response` is `true` (the default), user speech detected while a response is playing cancels generation immediately. The mechanism is coordinated by a `CancelScope` object shared between the async router and the pipeline threads.
+
+### How CancelScope works
+
+`CancelScope` manages two state variables:
+
+| Variable | Type | Purpose |
+|---|---|---|
+| `generation` | `int` | Monotonically incrementing counter. Pipeline threads capture this at the start of each response and call `is_stale(gen)` on every streaming token to detect supersession. |
+| `discarding` | `bool` | When `True`, the `_send_loop` silently drops stale audio and assistant-text events that arrive between `cancel()` and the `__RESPONSE_DONE__` sentinel. |
+
+### Barge-in sequence
+
+<Steps>
+  <Step title="VAD detects speech">
+    VAD puts a `SpeechStartedEvent` on `text_output_queue`. The `_send_loop` processes text events before audio (priority), so the cancellation path runs before any buffered audio chunks.
+  </Step>
+  <Step title="Response cancelled">
+    If a response is active and `interrupt_response` is enabled, `RealtimeService` emits `response.output_audio.done` + `response.done` with `status="cancelled"` and `reason="turn_detected"`.
+  </Step>
+  <Step title="Cancel and flush">
+    `cancel_scope.cancel()` increments the generation counter and sets `discarding=True`. Both `output_queue` (audio) and `text_output_queue` are flushed — `__RESPONSE_DONE__` sentinels are preserved.
+  </Step>
+  <Step title="LLM and TTS abort">
+    Both handlers call `cancel_scope.is_stale(gen)` on every streaming token. Once stale, they stop generating immediately — no timer or polling required.
+  </Step>
+  <Step title="Discard guard clears">
+    When `__RESPONSE_DONE__` arrives, `cancel_scope.response_done()` sets `discarding=False`. The pipeline is now processing the new user utterance.
+  </Step>
+</Steps>
+
+**Client-initiated cancel:** Sending `response.cancel` calls `cancel_scope.cancel()` (only if a response is active), triggers `finish_response(status="cancelled", reason="client_cancelled")`, and re-enables `should_listen`.
+
+<Warning>
+  If no response is active, `cancel_scope.cancel()` is intentionally **not** called. Calling it without an active response would set `discarding=True` with no `__RESPONSE_DONE__` sentinel to clear it, causing all subsequent audio to be silently dropped.
+</Warning>
+
+## Live transcription
+
+When `--enable_live_transcription` is passed at startup, `TranscriptionNotifier` taps STT output and emits two event types:
+
+| Event | Description |
+|---|---|
+| `conversation.item.input_audio_transcription.delta` | Streaming partial transcript text as tokens arrive from STT. |
+| `conversation.item.input_audio_transcription.completed` | Final transcript for the user turn, including audio duration in the `usage` field. |
+
+These events are sent in real time as the user speaks, before the LLM begins generating. The full `transcript` field in the completed event is what gets injected into the LLM context.
+
+## Tool calling
+
+Tools are defined in `session.update` as standard JSON Schema objects and are supported for both local and remote LLM backends.
+
+### Local LLM path (transformers / mlx-lm)
+
+Tools are converted to `FunctionTool` objects. Each tool's JSON Schema `parameters` are translated into a Python `inspect.Signature`, and `to_code_prompt()` renders a human-readable function signature:
+
+```
+def get_weather(city: str):
+    """Return current weather for a city.
+
+    Args:
+        city: City name
+    """
+```
+
+These signatures are injected into the system prompt via a Jinja2 template that instructs the model to wrap tool calls in `<code>` delimiters:
+
+```
+<code>
+get_weather(city='Paris')
+</code>
+```
+
+After generation, a regex extracts `<code>` blocks, parses `name(kwargs)` calls, and validates them against registered tools. Valid calls become `ResponseFunctionToolCall` dicts with generated `call_id` values.
+
+### Remote LLM path (responses-api)
+
+Tools are passed natively as the `tools=` parameter to `client.responses.create`. The API returns structured `function_call` items directly — no prompt engineering or regex parsing is required. Per-response `tool_choice` overrides from `response.create` are supported.
+
+### Tool result flow
+
+<Steps>
+  <Step title="Server emits tool call">
+    The router sends `response.function_call_arguments.done` with `call_id`, `name`, and `arguments` to the client.
+  </Step>
+  <Step title="Client executes the tool">
+    The client runs the tool and sends `conversation.item.create` with `type: "function_call_output"` and `output: "<result>"`.
+  </Step>
+  <Step title="Server acknowledges">
+    `RealtimeService` appends the tool output to the chat context and emits `conversation.item.created`. This does **not** trigger generation.
+  </Step>
+  <Step title="Optional follow-up generation">
+    If the result should be spoken (e.g. a search result or sensor reading), the client sends `response.create` to trigger follow-up LLM generation. For fire-and-forget actions (e.g. robot movement), the client can stop after `conversation.item.created` — the assistant should already have spoken the lead-in phrase before the tool call.
+  </Step>
+</Steps>
+
+## Error codes
+
+| Code | When emitted |
+|---|---|
+| `session_limit_reached` | All pipeline slots are occupied; new connection rejected. |
+| `unknown_or_invalid_event` | The server received a client event with an unrecognised or missing `type` field. |
+| `invalid_session_type` | A `session.update` targeted a transcription session (`RealtimeTranscriptionSessionCreateRequest`), which is not supported — only `realtime` sessions are accepted. |
+| `conversation_already_has_active_response` | `response.create` was sent while another response is still in progress. |
+| `response_failed` | Generation failed (e.g. invalid out-of-band input, empty context rejected by provider). |
+
+## Usage metrics
+
+Cumulative token and audio usage across all completed responses is available at:
+
+```bash
+curl http://localhost:8765/v1/usage
+```
+
+```json
+{
+  "input_tokens": 1024,
+  "output_tokens": 512,
+  "audio_duration_s": 34.7,
+  "responses_completed": 8,
+  "responses_cancelled": 2,
+  "tool_calls": 3,
+  "turns": 10,
+  "connections": 4,
+  "total_tokens": 1536,
+  "total_errors": 1,
+  "errors_by_type": {
+    "unknown_or_invalid_event": 1
+  }
+}
+```

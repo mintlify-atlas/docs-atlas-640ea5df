@@ -1,0 +1,163 @@
+---
+title: "Local Mode: Run the Voice Agent on Your Machine"
+sidebarTitle: "Local"
+description: "Capture microphone audio and play back responses through speakers on a single machine with no network setup required."
+---
+
+Local mode runs the entire speech-to-speech pipeline on your machine, reading audio directly from the default microphone and writing generated speech to the default speakers via `sounddevice`. There is no TCP socket or WebSocket server — the `LocalAudioStreamer` manages a bidirectional `sounddevice.Stream` at 16 kHz, int16, mono (512-sample blocks). This makes local mode the fastest path to a working voice agent on a single machine: no client process, no network, no port configuration.
+
+## Starting Local Mode
+
+```bash
+speech-to-speech --mode local
+```
+
+The pipeline starts with the default STT (Parakeet TDT), LLM backend (Responses API), and TTS (Qwen3). Set `OPENAI_API_KEY` (or `--responses_api_api_key`) before launching if you are using the default remote LLM backend.
+
+## Optimal Settings for Apple Silicon
+
+The `--local_mac_optimal_settings` flag applies a tuned preset that selects MPS-accelerated models for every stage:
+
+- **STT**: Parakeet TDT (fast streaming ASR on Apple Silicon)
+- **LLM**: MLX-LM backend
+- **TTS**: Qwen3-TTS (MLX variant, 6-bit quantization by default)
+- **Device**: `--device mps` for all handlers
+
+```bash
+speech-to-speech --local_mac_optimal_settings
+```
+
+You can override any individual setting while keeping the rest of the preset:
+
+```bash
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+```
+
+<Tip>
+  On Apple Silicon, `--tts pocket` and `--tts kokoro` are both valid TTS alternatives to `qwen3`. Pocket TTS provides voice cloning; Kokoro-82M is a fast, high-quality option. Note that Pocket TTS requires `numpy>=2` and conflicts with DeepFilterNet, which requires `numpy<2`.
+</Tip>
+
+## Selecting a Compute Device
+
+Use `--device` to route all handlers to a specific device, or set per-handler device flags:
+
+```bash
+# Apple Silicon (MPS)
+speech-to-speech --mode local --device mps
+
+# NVIDIA GPU
+speech-to-speech --mode local --device cuda
+
+# CPU-only
+speech-to-speech --mode local --device cpu
+```
+
+## LLM Backend Examples
+
+<Tabs>
+  <Tab title="MLX-LM (Apple Silicon)">
+    Fully local inference on Apple Silicon using MLX:
+
+    ```bash
+    speech-to-speech \
+        --mode local \
+        --stt parakeet-tdt \
+        --llm_backend mlx-lm \
+        --tts qwen3 \
+        --qwen3_tts_mlx_quantization 6bit \
+        --model_name "mlx-community/Qwen3-4B-Instruct-2507-bf16" \
+        --enable_live_transcription
+    ```
+  </Tab>
+  <Tab title="Transformers (CUDA/CPU)">
+    Fully local inference using the Transformers backend on CUDA or CPU:
+
+    ```bash
+    speech-to-speech \
+        --mode local \
+        --stt parakeet-tdt \
+        --llm_backend transformers \
+        --tts qwen3 \
+        --model_name "Qwen/Qwen3-4B-Instruct-2507" \
+        --enable_live_transcription
+    ```
+  </Tab>
+  <Tab title="OpenAI (Responses API)">
+    Local audio I/O with a remote LLM via the OpenAI Responses API:
+
+    ```bash
+    speech-to-speech \
+        --mode local \
+        --stt parakeet-tdt \
+        --llm_backend responses-api \
+        --tts qwen3 \
+        --qwen3_tts_mlx_quantization 6bit \
+        --model_name "gpt-4o-mini" \
+        --responses_api_api_key "$OPENAI_API_KEY" \
+        --responses_api_stream \
+        --enable_live_transcription
+    ```
+  </Tab>
+  <Tab title="HF Inference Providers">
+    Local audio with a remote LLM through the HuggingFace Inference router:
+
+    ```bash
+    speech-to-speech \
+        --mode local \
+        --stt parakeet-tdt \
+        --llm_backend responses-api \
+        --tts qwen3 \
+        --qwen3_tts_mlx_quantization 6bit \
+        --model_name "Qwen/Qwen3.5-9B:together" \
+        --responses_api_base_url "https://router.huggingface.co/v1" \
+        --responses_api_api_key "$HF_TOKEN" \
+        --responses_api_stream \
+        --enable_live_transcription
+    ```
+  </Tab>
+</Tabs>
+
+## Live Transcription
+
+`--enable_live_transcription` (enabled by default) streams partial STT hypotheses to the terminal while the user is speaking. Works best with Parakeet TDT, which provides sub-100 ms latency streaming ASR on Apple Silicon.
+
+```bash
+speech-to-speech --mode local --enable_live_transcription
+```
+
+## Multi-Language Support
+
+Pass `--language auto` to have the STT detect the spoken language on every turn and forward it to the LLM:
+
+```bash
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --stt parakeet-tdt \
+    --language auto \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+```
+
+For a fixed language, pass the language code directly. Example for Chinese using `whisper-mlx` for broader language coverage:
+
+```bash
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --stt whisper-mlx \
+    --stt_model_name large-v3 \
+    --language zh \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+```
+
+## How Local Audio Streaming Works
+
+`LocalAudioStreamer` opens a single bidirectional `sounddevice.Stream` at 16 kHz, int16, mono with a block size of 512 samples. The stream callback drives both directions in one call:
+
+- **Input path**: when the output queue is empty (no assistant audio is playing), the callback copies the raw `int16` microphone frame into the `input_queue` for the VAD handler.
+- **Output path**: when the output queue has data, the callback pops one chunk and writes it to the speaker output. A static ±1 LSB dither buffer keeps the audio sink active with negligible noise when no audio is queued.
+- **Re-enabling listening**: when the TTS emits an `AUDIO_RESPONSE_DONE` sentinel the callback sets `should_listen`, allowing the next microphone frame to flow into the VAD.
+
+<Note>
+  Local mode is best suited for single-machine use. To stream audio from a separate device or browser, use [Server/Client mode](/modes/server-client), [WebSocket mode](/modes/websocket), or [Realtime mode](/modes/realtime) instead.
+</Note>

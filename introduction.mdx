@@ -1,0 +1,114 @@
+---
+title: "Speech to Speech: Modular Voice Agent Pipeline"
+sidebarTitle: "Introduction"
+description: "An open-source Python library for building low-latency voice agents using a modular VAD→STT→LLM→TTS cascaded pipeline."
+---
+
+Speech to Speech is an open-source Python library and CLI from Hugging Face for building fully local or API-backed voice agents. It implements a four-stage cascaded pipeline — Voice Activity Detection, Speech-to-Text, Language Model inference, and Text-to-Speech — where each stage is independently swappable. You can mix local models running on your own hardware with cloud APIs, select backend implementations optimized for Apple Silicon or CUDA, and expose the full pipeline through an OpenAI Realtime-compatible WebSocket API that any OpenAI Realtime client can connect to out of the box.
+
+## Pipeline Architecture
+
+The pipeline processes audio end-to-end through four sequential stages. Each stage runs in its own thread, communicating via typed queues, so the LLM can begin generating text while the STT stage is still finishing, and TTS synthesis can start streaming audio before the full LLM response is complete.
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│     VAD     │────▶│     STT     │────▶│     LLM     │────▶│     TTS     │
+│  (Silero)   │     │  (Parakeet  │     │ (responses- │     │  (Qwen3-    │
+│             │     │   TDT, etc) │     │  api, etc.) │     │  TTS, etc.) │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+     Detects              Transcribes        Generates           Synthesizes
+   user speech            audio to text    text response        audio output
+```
+
+Each arrow in the diagram is a thread-safe queue. The `BaseHandler` class in `baseHandler.py` provides the foundational `run()` loop that reads from `queue_in`, calls `process()`, and writes to `queue_out`, making it straightforward to implement a new backend for any stage.
+
+## Pipeline Stages
+
+### 1. Voice Activity Detection (VAD)
+
+The VAD stage listens to the raw audio stream and segments it into speech regions, filtering out silence and background noise before sending audio chunks downstream. The default implementation uses **Silero VAD v5**.
+
+Key parameters control latency vs. accuracy trade-offs: `--thresh` sets the activation threshold, `--min_speech_ms` sets the minimum duration of audio to be considered speech, and `--min_silence_ms` sets how long silence must last before a turn is committed.
+
+### 2. Speech to Text (STT)
+
+The STT stage transcribes audio chunks produced by VAD into text. The default backend is **Parakeet TDT**, which delivers sub-100ms real-time streaming transcription on Apple Silicon and CUDA. The stage also supports live (progressive) transcription — partial transcripts are streamed to the client while the user is still speaking when `--enable_live_transcription` is set.
+
+Available STT backends:
+
+| Backend flag | Implementation |
+|---|---|
+| `parakeet-tdt` | NVIDIA Parakeet TDT 1.1B (default) |
+| `whisper` | Any Whisper checkpoint via Transformers 🤗 |
+| `whisper-mlx` | Lightning Whisper MLX (Apple Silicon) |
+| `mlx-audio-whisper` | MLX Audio Whisper (Apple Silicon) |
+| `faster-whisper` | CTranslate2-based Whisper (requires `[faster-whisper]` extra) |
+| `paraformer` | FunASR Paraformer (requires `[paraformer]` extra) |
+
+### 3. Language Model (LLM)
+
+The LLM stage receives the transcribed text prompt and generates a text response. Because LLM inference is the highest-latency component, the pipeline supports the full spectrum of inference backends: fully local Transformers or MLX, self-hosted servers (vLLM, llama.cpp), and provider APIs (OpenAI, Hugging Face Inference Providers, OpenRouter, DeepSeek, and any other OpenAI-compatible endpoint).
+
+Available LLM backends:
+
+| Backend flag | Implementation |
+|---|---|
+| `responses-api` | OpenAI Responses API — OpenAI, HF Inference Providers, OpenRouter, vLLM, llama.cpp (default) |
+| `chat-completions` | OpenAI Chat Completions `/v1/chat/completions` — same connection flags as `responses-api` |
+| `transformers` | Local inference via Hugging Face Transformers (CUDA / CPU) |
+| `mlx-lm` | Local inference via MLX (Apple Silicon) |
+
+### 4. Text to Speech (TTS)
+
+The TTS stage synthesizes audio from the text tokens produced by the LLM and streams it back to the client. The default backend is **Qwen3-TTS** using a GGML backend on Linux and an MLX backend on macOS.
+
+Available TTS backends:
+
+| Backend flag | Implementation |
+|---|---|
+| `qwen3` | Qwen3-TTS (default) — GGML on Linux, MLX on macOS |
+| `pocket` | Pocket TTS by Kyutai Labs — streaming TTS with voice cloning (requires `[pocket]` extra) |
+| `kokoro` | Kokoro-82M — fast, high-quality TTS optimized for Apple Silicon (requires `[kokoro]` extra) |
+| `chatTTS` | ChatTTS — multilingual TTS (requires `[chattts]` extra) |
+| `facebookMMS` | Facebook MMS-TTS |
+
+## Run Modes
+
+The pipeline can be started in four modes controlled by the `--mode` flag:
+
+<CardGroup cols={2}>
+  <Card title="Realtime (default)" icon="radio">
+    Starts an OpenAI Realtime-compatible WebSocket server on port 8765. Any OpenAI Realtime client can connect to `/v1/realtime` and send/receive audio using the standard protocol. This is the recommended mode for building voice-enabled applications.
+  </Card>
+  <Card title="Local" icon="laptop">
+    Reads from the system microphone and plays audio through the system speaker directly. No network server is started. Ideal for personal use on a single machine. Use `--local_mac_optimal_settings` for a single-flag Mac setup.
+  </Card>
+  <Card title="Socket" icon="plug">
+    Runs a TCP socket server. A companion `listen_and_play.py` client streams microphone audio to the server and plays back the generated audio. Useful for separating compute (server) from the audio device (client) on a local network.
+  </Card>
+  <Card title="WebSocket" icon="globe">
+    Runs a plain WebSocket server (not the Realtime protocol). Clients send raw 16 kHz int16 mono PCM audio bytes and receive generated audio bytes. Useful for custom browser or application clients that need WebSocket transport without the full Realtime protocol.
+  </Card>
+</CardGroup>
+
+## OpenAI Realtime-Compatible WebSocket API
+
+In `--mode realtime` (the default), Speech to Speech exposes a WebSocket endpoint at `ws://localhost:8765/v1/realtime` that is fully compatible with the OpenAI Realtime client. This means you can point any existing OpenAI Realtime integration at your local pipeline — with local models — simply by changing the `base_url`.
+
+The server implements the standard Realtime event protocol:
+
+- **Client → Server**: `input_audio_buffer.append`, `session.update`, `conversation.item.create`, `response.create`, `response.cancel`
+- **Server → Client**: `session.created`, `input_audio_buffer.speech_started/stopped`, `response.output_audio.delta`, `response.output_audio_transcript.done`, `response.function_call_arguments.done`, `response.done`, and more
+
+## Project Structure
+
+Speech to Speech is an **open-source Apache-2.0 Python package** published on PyPI as `speech-to-speech`. The CLI entry point `speech-to-speech` maps directly to `speech_to_speech.s2s_pipeline:main`. Platform-specific dependencies (MLX stack for macOS, Qwen3-TTS GGML backend for Linux) are resolved automatically from a single `pyproject.toml` using platform markers. Python 3.10, 3.11, and 3.12 are supported.
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install Speech to Speech and its optional backend extras.
+  </Card>
+  <Card title="Quickstart" icon="play" href="/quickstart">
+    Get a voice agent running in under five minutes.
+  </Card>
+</CardGroup>

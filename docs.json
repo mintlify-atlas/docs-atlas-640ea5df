@@ -1,72 +1,91 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "Speech to Speech",
+  "theme": "palm",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#f8c61e",
+    "light": "#fbf9ec",
+    "dark": "#4e412f"
   },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
+  "favicon": "https://media.brand.dev/981656d6-04fa-479c-9264-7adb4767b255.jpg",
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/huggingface/speech-to-speech"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/huggingface/speech-to-speech"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Pipeline Modes",
+            "pages": [
+              "modes/realtime",
+              "modes/local",
+              "modes/server-client",
+              "modes/websocket",
+              "modes/docker"
+            ]
+          },
+          {
+            "group": "Pipeline Components",
+            "pages": [
+              "components/vad",
+              "components/stt",
+              "components/llm",
+              "components/tts"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/apple-silicon",
+              "guides/multi-language",
+              "guides/tool-calling",
+              "guides/benchmarking"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "CLI Reference",
+            "pages": [
+              "reference/cli-overview",
+              "reference/module-arguments",
+              "reference/vad-arguments",
+              "reference/stt-arguments",
+              "reference/llm-arguments",
+              "reference/tts-arguments",
+              "reference/connection-arguments"
+            ]
+          },
+          {
+            "group": "Realtime API",
+            "pages": [
+              "reference/realtime-api",
+              "reference/realtime-events"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

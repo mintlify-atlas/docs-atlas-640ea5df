@@ -1,0 +1,290 @@
+---
+title: "STT Handler Arguments: Speech-to-Text Config"
+sidebarTitle: "STT Args"
+description: "All STT configuration flags for every backend: Whisper, Faster-Whisper, Parakeet TDT, Paraformer, and MLX Audio Whisper."
+---
+
+The STT stage converts raw audio frames into text that is forwarded to the LLM. Five backends are available, each selected via `--stt <value>` on [ModuleArguments](/reference/module-arguments). Every backend uses its own flag prefix so that all argument classes can coexist in the same namespace.
+
+Select a backend, then use the corresponding flags:
+
+```bash
+# Parakeet TDT (default)
+speech-to-speech --stt parakeet-tdt --parakeet_tdt_device auto
+
+# Whisper (Transformers)
+speech-to-speech --stt whisper --stt_model_name openai/whisper-large-v3
+
+# Faster-Whisper
+speech-to-speech --stt faster-whisper --faster_whisper_stt_model_name large-v3
+
+# Paraformer
+speech-to-speech --stt paraformer --paraformer_stt_model_name paraformer-zh
+
+# MLX Audio Whisper (Apple Silicon)
+speech-to-speech --stt mlx-audio-whisper --mlx_audio_whisper_model_name mlx-community/whisper-large-v3-turbo
+```
+
+<Tabs>
+  <Tab title="Whisper">
+
+    Prefix: `--stt_`  
+    Backend value: `--stt whisper`
+
+    Uses any Whisper checkpoint available on the Hugging Face Hub through the Transformers library, including `openai/whisper-large-v3` and `distil-whisper/distil-large-v3`.
+
+    <ParamField path="stt_model_name" type="string" default="distil-whisper/distil-large-v3">
+      The Hugging Face Hub model ID of the Whisper checkpoint to load. Any compatible checkpoint works, including distilled variants.
+
+      ```bash
+      speech-to-speech --stt whisper --stt_model_name openai/whisper-large-v3
+      ```
+    </ParamField>
+
+    <ParamField path="stt_device" type="string" default="cuda">
+      Device to run the Whisper model on. Set to `cpu` for CPU-only inference or `mps` for Apple Silicon.
+
+      ```bash
+      speech-to-speech --stt whisper --stt_device cpu
+      ```
+    </ParamField>
+
+    <ParamField path="stt_torch_dtype" type="string" default="float16">
+      PyTorch data type for model weights and activations. One of `float32` (full precision), `float16`, or `bfloat16` (both half precision). Use `float32` on CPU.
+
+      ```bash
+      speech-to-speech --stt whisper --stt_torch_dtype bfloat16
+      ```
+    </ParamField>
+
+    <ParamField path="stt_compile_mode" type="string">
+      Torch compile mode. One of `default`, `reduce-overhead`, or `max-autotune`. When unset (default), compilation is disabled. `reduce-overhead` typically gives the best latency reduction for streaming inference.
+
+      ```bash
+      speech-to-speech --stt whisper --stt_compile_mode reduce-overhead
+      ```
+    </ParamField>
+
+    <ParamField path="stt_gen_max_new_tokens" type="integer" default="128">
+      Maximum number of new tokens to generate per transcription call. Raise this for very long utterances.
+
+      ```bash
+      speech-to-speech --stt whisper --stt_gen_max_new_tokens 256
+      ```
+    </ParamField>
+
+    <ParamField path="stt_gen_num_beams" type="integer" default="1">
+      Number of beams for beam search. The default `1` uses greedy decoding, which is fastest. Increase to improve accuracy at the cost of latency.
+
+      ```bash
+      speech-to-speech --stt whisper --stt_gen_num_beams 4
+      ```
+    </ParamField>
+
+    <ParamField path="stt_gen_return_timestamps" type="boolean" default="false">
+      Whether to include word-level or segment-level timestamps in the transcription output.
+
+      ```bash
+      speech-to-speech --stt whisper --stt_gen_return_timestamps
+      ```
+    </ParamField>
+
+    <ParamField path="stt_gen_task" type="string" default="transcribe">
+      The generation task. Use `transcribe` to output text in the source language, or `translate` to output English regardless of the input language.
+
+      ```bash
+      speech-to-speech --stt whisper --stt_gen_task translate
+      ```
+    </ParamField>
+
+    <ParamField path="language" type="string" default="en">
+      BCP-47 language code for transcription. Set to `auto` to let Whisper detect the language dynamically each utterance. Supported codes include `en`, `fr`, `es`, `zh`, `ko`, `ja`, `hi`.
+
+      ```bash
+      speech-to-speech --stt whisper --language auto
+      ```
+    </ParamField>
+
+  </Tab>
+  <Tab title="Faster-Whisper">
+
+    Prefix: `--faster_whisper_stt_`  
+    Backend value: `--stt faster-whisper`
+
+    Uses the CTranslate2-powered Faster-Whisper library for quantized inference on CPU and CUDA. Install with `pip install "speech-to-speech[faster-whisper]"`.
+
+    <ParamField path="faster_whisper_stt_model_name" type="string" default="tiny.en">
+      The model size or identifier. Valid options: `tiny`, `tiny.en`, `base`, `base.en`, `small`, `small.en`, `distil-small.en`, `medium`, `medium.en`, `distil-medium.en`, `large-v1`, `large-v2`, `large-v3`, `large`, `distil-large-v2`, `distil-large-v3`.
+
+      ```bash
+      speech-to-speech --stt faster-whisper --faster_whisper_stt_model_name large-v3
+      ```
+    </ParamField>
+
+    <ParamField path="faster_whisper_stt_device" type="string" default="auto">
+      Device for inference. One of `cpu`, `cuda`, or `auto`. `auto` selects CUDA when available, otherwise CPU.
+
+      ```bash
+      speech-to-speech --stt faster-whisper --faster_whisper_stt_device cuda
+      ```
+    </ParamField>
+
+    <ParamField path="faster_whisper_stt_compute_type" type="string" default="auto">
+      CTranslate2 quantization type. One of `default`, `auto`, `int8`, `int8_float32`, `int8_float16`, `int8_bfloat16`, `int16`, `float16`, `float32`, or `bfloat16`. Refer to the [CTranslate2 quantization guide](https://opennmt.net/CTranslate2/quantization.html#quantize-on-model-loading) for details.
+
+      ```bash
+      speech-to-speech --stt faster-whisper --faster_whisper_stt_compute_type int8
+      ```
+    </ParamField>
+
+    <ParamField path="faster_whisper_stt_gen_max_new_tokens" type="integer" default="128">
+      Maximum number of tokens to generate per transcription call.
+
+      ```bash
+      speech-to-speech --stt faster-whisper --faster_whisper_stt_gen_max_new_tokens 256
+      ```
+    </ParamField>
+
+    <ParamField path="faster_whisper_stt_gen_beam_size" type="integer" default="1">
+      Number of beams for beam search. `1` enables greedy decoding.
+
+      ```bash
+      speech-to-speech --stt faster-whisper --faster_whisper_stt_gen_beam_size 4
+      ```
+    </ParamField>
+
+    <ParamField path="faster_whisper_stt_gen_return_timestamps" type="boolean" default="false">
+      Whether to return timestamps alongside transcribed text.
+
+      ```bash
+      speech-to-speech --stt faster-whisper --faster_whisper_stt_gen_return_timestamps
+      ```
+    </ParamField>
+
+    <ParamField path="faster_whisper_stt_gen_task" type="string" default="transcribe">
+      Task to perform. Use `transcribe` for source-language output or `translate` for English output.
+
+      ```bash
+      speech-to-speech --stt faster-whisper --faster_whisper_stt_gen_task transcribe
+      ```
+    </ParamField>
+
+    <ParamField path="faster_whisper_stt_gen_language" type="string" default="en">
+      Language of the speech to transcribe as a BCP-47 code.
+
+      ```bash
+      speech-to-speech --stt faster-whisper --faster_whisper_stt_gen_language fr
+      ```
+    </ParamField>
+
+  </Tab>
+  <Tab title="Parakeet TDT">
+
+    Prefix: `--parakeet_tdt_`  
+    Backend value: `--stt parakeet-tdt` (default)
+
+    NVIDIA Parakeet TDT 0.6B v3 — a 600 M parameter multilingual ASR model. On Apple Silicon (MPS) it uses `mlx-audio` with `mlx-community/parakeet-tdt-0.6b-v3`; on CUDA/CPU it uses `nano-parakeet` (pure PyTorch) with `nvidia/parakeet-tdt-0.6b-v3`. Sub-100 ms latency on Apple Silicon.
+
+    <ParamField path="parakeet_tdt_model_name" type="string">
+      The Parakeet TDT model to load. Defaults to `mlx-community/parakeet-tdt-0.6b-v3` on MPS and `nvidia/parakeet-tdt-0.6b-v3` on CUDA/CPU. Override to point at a custom fine-tune.
+
+      ```bash
+      speech-to-speech --stt parakeet-tdt \
+          --parakeet_tdt_model_name nvidia/parakeet-tdt-0.6b-v3
+      ```
+    </ParamField>
+
+    <ParamField path="parakeet_tdt_device" type="string" default="auto">
+      Device to run the model on. `auto` selects MPS on macOS and CUDA otherwise. Explicit options: `auto`, `cuda`, `mps`, `cpu`.
+
+      ```bash
+      speech-to-speech --stt parakeet-tdt --parakeet_tdt_device mps
+      ```
+    </ParamField>
+
+    <ParamField path="parakeet_tdt_compute_type" type="string" default="float16">
+      Floating-point precision for inference. Options: `float16`, `float32`.
+
+      ```bash
+      speech-to-speech --stt parakeet-tdt --parakeet_tdt_compute_type float32
+      ```
+    </ParamField>
+
+    <ParamField path="parakeet_tdt_language" type="string">
+      Target language code for transcription. When unset the model auto-detects the language. Supports 25 European languages.
+
+      ```bash
+      speech-to-speech --stt parakeet-tdt --parakeet_tdt_language en
+      ```
+    </ParamField>
+
+  </Tab>
+  <Tab title="Paraformer">
+
+    Prefix: `--paraformer_stt_`  
+    Backend value: `--stt paraformer`
+
+    Uses the FunASR Paraformer model family. Well-suited for Mandarin and other Asian languages. Install with `pip install "speech-to-speech[paraformer]"`.
+
+    <ParamField path="paraformer_stt_model_name" type="string" default="paraformer-zh">
+      Model ID to load from the FunASR model hub. Browse available checkpoints at [https://github.com/modelscope/FunASR](https://github.com/modelscope/FunASR).
+
+      ```bash
+      speech-to-speech --stt paraformer --paraformer_stt_model_name paraformer-zh
+      ```
+    </ParamField>
+
+    <ParamField path="paraformer_stt_device" type="string" default="cuda">
+      Device to run the Paraformer model on.
+
+      ```bash
+      speech-to-speech --stt paraformer --paraformer_stt_device cpu
+      ```
+    </ParamField>
+
+  </Tab>
+  <Tab title="MLX Audio Whisper">
+
+    Prefix: `--mlx_audio_whisper_`  
+    Backend value: `--stt mlx-audio-whisper`
+
+    Fast Whisper inference on Apple Silicon via the `mlx-audio` library from Hugging Face. Requires macOS with an Apple Silicon chip.
+
+    <ParamField path="mlx_audio_whisper_model_name" type="string" default="mlx-community/whisper-large-v3-turbo">
+      The MLX-format Whisper model to load from the Hugging Face Hub.
+
+      ```bash
+      speech-to-speech --stt mlx-audio-whisper \
+          --mlx_audio_whisper_model_name mlx-community/whisper-large-v3-turbo
+      ```
+    </ParamField>
+
+    <ParamField path="mlx_audio_whisper_gen_kwargs" type="object" default="{}">
+      Additional generation keyword arguments forwarded directly to the `mlx-audio` model's generate call. Provide as a JSON object via the `gen_kwargs` pattern.
+
+      ```bash
+      speech-to-speech --stt mlx-audio-whisper \
+          --mlx_audio_whisper_gen_kwargs '{"language": "fr"}'
+      ```
+    </ParamField>
+
+  </Tab>
+</Tabs>
+
+## Multi-language usage
+
+All Whisper-based backends support `--language auto` for dynamic language detection. Parakeet TDT auto-detects across its 25 supported European languages when `--parakeet_tdt_language` is omitted. Paraformer is best suited for Mandarin with `--paraformer_stt_model_name paraformer-zh`.
+
+```bash
+# Whisper with automatic language detection
+speech-to-speech --stt whisper --language auto \
+    --stt_model_name openai/whisper-large-v3
+
+# Force Chinese with Whisper
+speech-to-speech --stt whisper --language zh \
+    --stt_model_name openai/whisper-large-v3
+```
+
+<Note>
+  STT and LLM checkpoints must be compatible with your target language(s). For multilingual TTS output, pair with ChatTTS or another backend that covers your target language.
+</Note>

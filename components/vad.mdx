@@ -1,0 +1,126 @@
+---
+title: "Voice Activity Detection with Silero VAD"
+sidebarTitle: "VAD"
+description: "Silero VAD v5 detects speech boundaries in real-time audio and gates the pipeline, forwarding confirmed utterances to the STT stage."
+---
+
+Voice Activity Detection (VAD) is the first stage of every pipeline run. The handler continuously receives raw 16-bit PCM audio, feeds it through [Silero VAD v5](https://github.com/snakers4/silero-vad), and emits audio segments only when genuine speech is detected. This keeps the downstream STT and LLM stages quiet during silence, cuts transcription latency, and enables the barge-in / speculative turn-reopening flows that make the realtime mode feel natural.
+
+The `VADHandler` wraps a `VADIterator` (a stateful sliding-window wrapper around the Silero model) and adds several pipeline-specific mechanisms on top: a speech-start hysteresis threshold, progressive audio release for live transcription, short-segment stitching, optional DeepFilterNet audio enhancement, and the speculative turn-reopening protocol used by realtime mode.
+
+## How VAD gates the pipeline
+
+1. Each audio chunk (raw bytes from the socket, WebSocket, or local mic) is converted to float32 and passed to `VADIterator`.
+2. When the iterator transitions from *silent* to *triggered*, the handler starts accumulating the speech buffer.
+3. Speech is confirmed and `SpeechStartedEvent` is emitted only once the accumulated **active** speech (samples above the VAD threshold) reaches `min_speech_ms`. This suppresses short noise bursts.
+4. When the iterator transitions back to *silent* for at least `min_silence_ms`, the accumulated buffer is yielded as a `VADAudio` message to the STT queue.
+5. Audio is padded with `speech_pad_ms` milliseconds of pre-speech context so the STT model hears the beginning of each utterance clearly.
+
+### Live / progressive transcription
+
+When `--enable_realtime_transcription` is set, the handler also yields `VADAudio(mode="progressive")` chunks at the interval set by `--realtime_processing_pause`. The STT stage transcribes these in parallel and emits `PartialTranscription` messages, which the realtime server forwards as `conversation.item.input_audio_transcription.delta` events.
+
+### Speculative turn-reopening
+
+Realtime mode keeps a soft-ended turn *reopenable* for `speculative_reopen_ms` after the user stops speaking. If the user resumes within that window (without the assistant having committed a response), the new speech is appended to the same turn rather than starting a new one. This eliminates false cuts caused by brief pauses mid-sentence.
+
+For turns that have *not yet received any assistant output*, the window is extended to `unanswered_reopen_ms` (default 7 s), so a long thinking pause does not orphan the user's question.
+
+Continuation speech (within the reopen window) only needs to pass the lower `min_speech_continuation_ms` bar, not the full `min_speech_ms` bar, reducing latency for short trailing fragments.
+
+### Barge-in / interruption
+
+When the user starts speaking while the assistant is generating audio, the VAD emits a `SpeechStartedEvent` with `interrupt_response=True`. The pipeline's cancel scope marks the current generation stale, the TTS handler drops in-flight audio, and the `should_listen` event is re-set so the next VAD segment is picked up normally.
+
+---
+
+## Configuration reference
+
+All VAD parameters are in `VADHandlerArguments` and can be passed directly on the CLI.
+
+<ParamField path="--thresh" type="float" default="0.6">
+  The confidence threshold for Silero VAD. Values range from 0 to 1; higher values require the model to be more certain before triggering. The default of 0.6 works well for most microphone setups.
+</ParamField>
+
+<ParamField path="--sample_rate" type="int" default="16000">
+  Sample rate of the incoming audio in Hz. Silero VAD is trained at 16 kHz; change this only if you are resampling before the VAD stage.
+</ParamField>
+
+<ParamField path="--min_silence_ms" type="int" default="64">
+  Minimum length of silence (in milliseconds) before the current speech segment is considered ended. Lower values cut sentences faster and improve barge-in responsiveness; higher values let the user pause briefly without triggering a cut.
+</ParamField>
+
+<ParamField path="--min_speech_ms" type="int" default="384">
+  Minimum active speech duration (ms) required to confirm a new utterance. Segments shorter than this are discarded as noise. For barge-in, this full bar must be crossed.
+</ParamField>
+
+<ParamField path="--min_speech_continuation_ms" type="int" default="192">
+  Lower hysteresis bar (ms) for speech that *continues* a soft-ended, uncommitted turn within the reopen window. Set to `0` to disable the split and always use `min_speech_ms`. Clamped to the range `[100, min_speech_ms]`. The recommended pairing is `--min_speech_ms 384 --min_speech_continuation_ms 192`.
+</ParamField>
+
+<ParamField path="--max_speech_ms" type="float" default="inf">
+  Maximum continuous speech duration before a forced segment split. Default is infinite (no forced splits). Useful in server deployments to bound memory use for very long utterances.
+</ParamField>
+
+<ParamField path="--speech_pad_ms" type="int" default="500">
+  Amount of audio (ms) retained *before* the VAD trigger and prepended to each detected speech segment. This pre-speech context helps the STT model hear the very beginning of each utterance without cutting off the first phoneme.
+</ParamField>
+
+<ParamField path="--audio_enhancement" type="bool" default="False">
+  When `True`, applies [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) noise reduction, equalization, and echo cancellation to each speech segment before passing it to the STT stage. Requires `pip install deepfilternet` (not compatible with Pocket TTS; see note below).
+</ParamField>
+
+<ParamField path="--enable_realtime_transcription" type="bool" default="False">
+  Enable progressive audio release during speech so the STT stage can emit partial transcripts in real time. Required for the `conversation.item.input_audio_transcription.delta` event stream in realtime mode.
+</ParamField>
+
+<ParamField path="--realtime_processing_pause" type="float" default="0.5">
+  Interval in seconds between progressive audio chunk emissions during speech. Smaller values give more frequent partial updates at the cost of more STT calls. Automatically backed off for long speech segments.
+</ParamField>
+
+<ParamField path="--speculative_reopen_ms" type="int" default="1000">
+  How long (ms, measured on the audio clock) a soft-ended turn stays reopenable once the assistant *has* started responding. Resumed speech within this window continues the same turn instead of starting a new one.
+</ParamField>
+
+<ParamField path="--unanswered_reopen_ms" type="int" default="7000">
+  Sanity cap (ms) for reopening a soft-ended turn that has *not* yet received any assistant output. Extends the reopen window for unanswered turns so a pause longer than `speculative_reopen_ms` does not orphan a question the model has not yet replied to. Has no effect below `speculative_reopen_ms`.
+</ParamField>
+
+<ParamField path="--short_segment_merge_ms" type="int" default="0">
+  When greater than `0`, adjacent VAD segments that are each shorter than `min_speech_ms` are held and stitched together for up to this many milliseconds before being discarded. Fragments shorter than 100 ms of active speech are never held. Useful when `min_silence_ms` is very low for snappier barge-in detection.
+</ParamField>
+
+---
+
+## Example: tuning VAD for low-latency barge-in
+
+```bash
+speech-to-speech \
+    --thresh 0.5 \
+    --min_silence_ms 32 \
+    --min_speech_ms 256 \
+    --min_speech_continuation_ms 128 \
+    --speech_pad_ms 300 \
+    --short_segment_merge_ms 200 \
+    --enable_realtime_transcription \
+    --realtime_processing_pause 0.25
+```
+
+## Example: conservative settings for noisy environments
+
+```bash
+speech-to-speech \
+    --thresh 0.7 \
+    --min_silence_ms 128 \
+    --min_speech_ms 512 \
+    --speech_pad_ms 600 \
+    --audio_enhancement
+```
+
+<Note>
+  `--audio_enhancement` requires `pip install deepfilternet` and is incompatible with Pocket TTS (which requires `numpy>=2`, while DeepFilterNet requires `numpy<2`). Install DeepFilterNet only in environments that do not use Pocket TTS.
+</Note>
+
+<Tip>
+  In realtime mode you can adjust `--thresh` and `--min_silence_ms` dynamically per-connection by sending a `session.update` event with a `turn_detection` object, for example `{"type": "server_vad", "threshold": 0.4, "silence_duration_ms": 48}`.
+</Tip>

@@ -1,0 +1,215 @@
+---
+title: "Benchmark STT and TTS Pipeline Performance"
+sidebarTitle: "Benchmarking"
+description: "Measure latency, RTF, and time-to-first-chunk across STT and TTS handlers to pick the fastest backend for your hardware."
+---
+
+The `scripts/` directory ships two standalone benchmark scripts — `benchmark_tts.py` and `benchmark_stt.py` — that measure handler performance independently of the full pipeline. Both scripts run multiple iterations, capture detailed timing statistics, print a sorted comparison table, and save results to a JSON file for further analysis.
+
+## TTS benchmarking with `benchmark_tts.py`
+
+`benchmark_tts.py` synthesises a fixed text string through one or more TTS handlers, records per-iteration timing, and computes average inference time, min/max/std, average audio duration, real-time factor (RTF), and time-to-first-chunk (TTFC).
+
+### Command-line flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--handlers` | `kokoro qwen3 pocket_tts` | Space-separated list of handlers to benchmark |
+| `--iterations` | `3` | Number of synthesis passes per handler |
+| `--text` | `Hello from the speech to speech benchmark. This is a latency test.` | Text to synthesise |
+| `--language_code` | `en` | Language code passed to each handler |
+| `--qwen3_mlx_quantizations` | *(none)* | One or more MLX quantization variants to benchmark as separate `qwen3[*]` entries |
+| `--output` | `tts_benchmark_results.json` | JSON file to write results to |
+
+### Comparing Qwen3 MLX quantization variants
+
+Use `--qwen3_mlx_quantizations` to expand a single `qwen3` handler entry into separate benchmark targets — one per quantization level. This is the recommended way to find the best quality/latency trade-off on Apple Silicon before committing to a setting in production:
+
+```bash
+python scripts/benchmark_tts.py \
+    --handlers qwen3 \
+    --iterations 3 \
+    --qwen3_mlx_quantizations bf16 4bit 6bit 8bit
+```
+
+This runs four independent benchmark passes: `qwen3[bf16]`, `qwen3[4bit]`, `qwen3[6bit]`, and `qwen3[8bit]`.
+
+### Benchmarking multiple handlers side by side
+
+Compare all available TTS backends in one run:
+
+```bash
+python scripts/benchmark_tts.py \
+    --handlers kokoro qwen3 pocket_tts \
+    --iterations 5
+```
+
+### Running a single handler
+
+```bash
+python scripts/benchmark_tts.py \
+    --handlers kokoro \
+    --iterations 10
+```
+
+---
+
+## What the TTS benchmark measures
+
+For each handler and each iteration the script records:
+
+- **Warmup time** — time from handler instantiation to the first successful synthesis (model load + JIT warm-up)
+- **Inference time** — wall-clock time from submitting text to consuming the last audio chunk
+- **Time to first chunk (TTFC)** — latency until the very first audio sample is available (important for streaming perception)
+- **Audio duration** — total length of the synthesised waveform in seconds
+- **RTF (Real-Time Factor)** — audio duration ÷ inference time; values > 1 mean faster-than-real-time
+
+After all iterations the script aggregates per-handler statistics:
+
+```
+Handler: qwen3[6bit]
+--------------------------------------------------------------------------------
+  Warmup Time:          1.2341s
+  Avg Inference Time:   0.8423s
+  Min Inference Time:   0.8102s
+  Max Inference Time:   0.8891s
+  Std Deviation:        0.0321s
+  Avg Audio Duration:   3.21s
+  Avg RTF:              3.81
+
+  Time to First Chunk:
+    Avg TTFC:           0.3104s
+    Min TTFC:           0.2987s
+    Max TTFC:           0.3341s
+    Std TTFC:           0.0149s
+
+  Total Iterations:     3
+```
+
+### Reading the comparison table
+
+The final comparison table ranks handlers by average inference time and shows relative slowdowns versus the fastest handler:
+
+```
+COMPARISON (Average Inference Time)
+================================================================================
+  qwen3[6bit]              : 0.8423s  (1.00x slower than fastest)
+  qwen3[4bit]              : 0.9107s  (1.08x slower than fastest)
+  qwen3[8bit]              : 1.1234s  (1.33x slower than fastest)
+  qwen3[bf16]              : 1.4501s  (1.72x slower than fastest)
+```
+
+A speedup ratio of `1.00x` means that handler is the fastest in the set. Higher ratios indicate proportionally longer inference time relative to the winner.
+
+---
+
+## STT benchmarking with `benchmark_stt.py`
+
+`benchmark_stt.py` loads a WAV file and transcribes it through one or more STT handlers, recording inference time, time-to-first-token (TTFT), and the sample transcription text for quality inspection.
+
+### Command-line flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--audio_file` | *(required)* | Path to a WAV audio file (16 kHz mono recommended) |
+| `--handlers` | `whisper whisper-mlx mlx-audio-whisper faster-whisper parakeet-tdt parakeet-tdt-progressive` | Space-separated list of handlers |
+| `--iterations` | `5` | Number of transcription passes per handler |
+| `--output` | `stt_benchmark_results.json` | JSON file to write results to |
+
+### Comparing all STT backends
+
+```bash
+python scripts/benchmark_stt.py \
+    --audio_file samples/test_16khz.wav \
+    --handlers whisper whisper-mlx mlx-audio-whisper faster-whisper parakeet-tdt \
+    --iterations 5
+```
+
+### Running a single backend
+
+```bash
+python scripts/benchmark_stt.py \
+    --audio_file samples/test_16khz.wav \
+    --handlers parakeet-tdt \
+    --iterations 10
+```
+
+### Comparing standard vs. progressive Parakeet TDT
+
+`parakeet-tdt-progressive` enables live transcription (`enable_live_transcription=True`) with a short update interval. Benchmarking both variants side by side shows the latency cost of the progressive path:
+
+```bash
+python scripts/benchmark_stt.py \
+    --audio_file samples/test_16khz.wav \
+    --handlers parakeet-tdt parakeet-tdt-progressive \
+    --iterations 5
+```
+
+---
+
+## What the STT benchmark measures
+
+For each handler and each iteration the script records:
+
+- **Warmup time** — initial model load time (measured once, excluded from iteration timings; an additional warmup pass on real audio is run before timing begins)
+- **Inference time** — wall-clock time from submitting the audio array to receiving the final transcript
+- **Time to first token (TTFT)** — latency until the first output token or partial transcript arrives (relevant for streaming STT handlers)
+- **Sample transcription** — the transcript from the first recorded iteration, printed for sanity-checking transcription quality
+
+Audio files that are not at 16 kHz are resampled automatically (via `librosa` or `scipy` as a fallback).
+
+---
+
+## Torch compile cache for repeated runs
+
+The pipeline sets `TORCHINDUCTOR_CACHE_DIR` at startup to cache compiled kernel artefacts between runs. This cache produces roughly a **50% reduction in `torch.compile` compilation time** on subsequent launches. The Whisper STT handler supports torch compile via `--stt_compile_mode`:
+
+```bash
+speech-to-speech \
+    --stt whisper \
+    --stt_compile_mode reduce-overhead \
+    --llm_backend responses-api \
+    --tts qwen3
+```
+
+On the first run, `torch.compile` traces and compiles the model graph. On every subsequent run with the same model and compile mode, the cached kernels are reused, skipping the compilation step and lowering startup latency significantly.
+
+<Tip>
+Run at least one warm-up pass before treating benchmark numbers as representative. Both `benchmark_stt.py` and `benchmark_tts.py` perform an explicit warmup pass that is excluded from the recorded timings, but the very first launch after a cold cache will include compilation overhead that later runs will not.
+</Tip>
+
+---
+
+## Saving and analysing results
+
+Both scripts write a timestamped JSON results file:
+
+```json
+{
+  "results": [
+    {
+      "handler": "qwen3[6bit]",
+      "warmup_time": 1.2341,
+      "avg_inference_time": 0.8423,
+      "min_inference_time": 0.8102,
+      "max_inference_time": 0.8891,
+      "std_inference_time": 0.0321,
+      "avg_audio_duration": 3.21,
+      "avg_rtf": 3.81,
+      "avg_time_to_first_chunk": 0.3104,
+      "total_iterations": 3,
+      "errors": []
+    }
+  ],
+  "timestamp": "2025-07-15 14:32:01"
+}
+```
+
+Pass `--output` to customise the file path:
+
+```bash
+python scripts/benchmark_tts.py \
+    --handlers qwen3 \
+    --qwen3_mlx_quantizations bf16 4bit 6bit 8bit \
+    --output results/qwen3_mac_m3_ultra.json
+```

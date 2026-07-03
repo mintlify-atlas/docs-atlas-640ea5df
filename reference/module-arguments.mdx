@@ -1,0 +1,149 @@
+---
+title: "ModuleArguments: Top-Level Pipeline Config"
+sidebarTitle: "Module Args"
+description: "Top-level CLI flags that select the pipeline mode, STT/LLM/TTS backends, global device, live transcription, and pipeline concurrency."
+---
+
+`ModuleArguments` is the first argument class parsed by the CLI and controls the high-level shape of the pipeline: which mode it runs in, which backend is selected for each stage, and global settings that apply across all handlers. These flags have no prefix — pass them directly, for example `--mode local` or `--tts kokoro`.
+
+## Fields
+
+<ParamField path="device" type="string">
+  If specified, overrides the device for **all** handlers in the pipeline (VAD, STT, LLM, TTS). When omitted, each handler uses its own default device (typically `cuda`). Useful to force everything to `cpu` or `mps` in one flag.
+
+  ```bash
+  speech-to-speech --device mps
+  ```
+</ParamField>
+
+<ParamField path="mode" type="'local' | 'socket' | 'websocket' | 'realtime'" default="realtime">
+  Selects the pipeline's I/O mode:
+
+  | Value | Description |
+  |---|---|
+  | `realtime` | Exposes an OpenAI Realtime-compatible WebSocket server at `/v1/realtime` |
+  | `local` | Reads from the local microphone and plays audio through the local speaker |
+  | `socket` | Streams audio in/out over TCP sockets (see `--recv_host` / `--send_host`) |
+  | `websocket` | Streams audio in/out over a WebSocket (see `--ws_host` / `--ws_port`) |
+
+  ```bash
+  speech-to-speech --mode local
+  ```
+</ParamField>
+
+<ParamField path="local_mac_optimal_settings" type="boolean" default="false">
+  When `true`, applies an opinionated preset for Apple Silicon: sets `--device mps`, selects Parakeet TDT for STT, MLX LM for the language model, and Qwen3-TTS for TTS. Flags specified after this one override individual parts of the preset.
+
+  ```bash
+  speech-to-speech --local_mac_optimal_settings \
+      --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+  ```
+</ParamField>
+
+<ParamField path="stt" type="'whisper' | 'whisper-mlx' | 'mlx-audio-whisper' | 'faster-whisper' | 'parakeet-tdt' | 'paraformer'" default="parakeet-tdt">
+  Selects the Speech-to-Text backend:
+
+  | Value | Backend | Best for |
+  |---|---|---|
+  | `parakeet-tdt` | NVIDIA Parakeet TDT 0.6B v3 | Low-latency streaming; default |
+  | `whisper` | Transformers Whisper | GPU servers with full HF integration |
+  | `whisper-mlx` | Lightning Whisper MLX | Apple Silicon (legacy) |
+  | `mlx-audio-whisper` | MLX Audio Whisper | Apple Silicon (fast) |
+  | `faster-whisper` | CTranslate2 Faster-Whisper | CPU/GPU with quantized inference |
+  | `paraformer` | FunASR Paraformer | Mandarin and multilingual ASR |
+
+  ```bash
+  speech-to-speech --stt faster-whisper
+  ```
+</ParamField>
+
+<ParamField path="llm_backend" type="'transformers' | 'mlx-lm' | 'responses-api' | 'chat-completions'" default="responses-api">
+  Selects the language model backend:
+
+  | Value | Description |
+  |---|---|
+  | `responses-api` | OpenAI-compatible Responses API (OpenAI, HF Inference, vLLM, llama.cpp, …) |
+  | `chat-completions` | OpenAI-compatible `/v1/chat/completions` endpoint |
+  | `transformers` | Local inference via Hugging Face Transformers |
+  | `mlx-lm` | Local inference on Apple Silicon via MLX |
+
+  ```bash
+  speech-to-speech --llm_backend mlx-lm --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+  ```
+</ParamField>
+
+<ParamField path="tts" type="'melo' | 'chatTTS' | 'facebookMMS' | 'pocket' | 'kokoro' | 'qwen3'" default="qwen3">
+  Selects the Text-to-Speech backend:
+
+  | Value | Backend | Notes |
+  |---|---|---|
+  | `qwen3` | Qwen3-TTS | Default; GGML on Linux/Windows, MLX on Apple Silicon |
+  | `kokoro` | Kokoro-82M | Fast, high-quality; optimised for Apple Silicon |
+  | `pocket` | Pocket TTS | Streaming TTS with voice cloning from Kyutai Labs |
+  | `chatTTS` | ChatTTS | Streaming synthesis |
+  | `facebookMMS` | Facebook MMS | Multilingual coverage |
+  | `melo` | MeloTTS | Deprecated; available in `archive/` |
+
+  ```bash
+  speech-to-speech --tts kokoro --kokoro_voice bm_fable
+  ```
+</ParamField>
+
+<ParamField path="log_level" type="string" default="info">
+  Sets the logging verbosity for all pipeline components. Accepts standard Python logging level names.
+
+  ```bash
+  speech-to-speech --log_level debug
+  ```
+</ParamField>
+
+<ParamField path="enable_live_transcription" type="boolean" default="true">
+  When `true`, streams partial transcription results to connected clients while the user is speaking. Works with the Parakeet TDT backend in `realtime` mode and surfaces as `conversation.item.input_audio_transcription.delta` events.
+
+  ```bash
+  speech-to-speech --enable_live_transcription
+  ```
+</ParamField>
+
+<ParamField path="live_transcription_update_interval" type="float" default="0.5">
+  How often (in seconds) the live transcription result is updated and emitted. Smaller values give more frequent partial updates at the cost of slightly higher CPU usage.
+
+  ```bash
+  speech-to-speech --live_transcription_update_interval 0.25
+  ```
+</ParamField>
+
+<ParamField path="live_transcription_min_silence_ms" type="integer" default="500">
+  Minimum silence duration in milliseconds before the live transcription considers the speech segment complete. Increase this value if transcription cuts off too early in quiet environments.
+
+  ```bash
+  speech-to-speech --live_transcription_min_silence_ms 800
+  ```
+</ParamField>
+
+<ParamField path="num_pipelines" type="integer" default="1">
+  Number of isolated realtime pipeline instances in the pool. Each pipeline has its own VAD, STT, LLM, and TTS handlers plus its own conversation state. The single uvicorn server on `--ws_port` routes each incoming WebSocket to the next free pipeline. Connections beyond `num_pipelines` are rejected. Only valid with `--mode realtime`.
+
+  ```bash
+  speech-to-speech --mode realtime --num_pipelines 4
+  ```
+</ParamField>
+
+## Common invocation patterns
+
+<CodeGroup>
+
+```bash Realtime server (default)
+speech-to-speech --mode realtime --num_pipelines 2
+```
+
+```bash Local Mac
+speech-to-speech --local_mac_optimal_settings \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+```
+
+```bash Debug logging
+speech-to-speech --log_level debug --mode local
+```
+
+</CodeGroup>

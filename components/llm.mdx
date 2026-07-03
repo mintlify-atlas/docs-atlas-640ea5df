@@ -1,0 +1,277 @@
+---
+title: "Language Model Backends and Configuration"
+sidebarTitle: "LLM"
+description: "Four LLM backends — transformers, mlx-lm, responses-api, and chat-completions — let you run any model locally or via any OpenAI-compatible provider."
+---
+
+The Language Model stage is the most compute-intensive component in the pipeline. A single forward pass through a large model can dominate end-to-end latency, so choosing the right backend for your hardware and latency budget matters. Select a backend with `--llm_backend` (default: `responses-api`) and pair it with `--model_name`.
+
+## Backend selection
+
+| `--llm_backend` value | Handler class | Best for |
+|---|---|---|
+| `transformers` | `LanguageModelHandler` | Local CUDA/CPU inference via Hugging Face Transformers |
+| `mlx-lm` | `LanguageModelHandler` | Local Apple Silicon inference via mlx-lm |
+| `responses-api` | `ResponsesApiModelHandler` | Any OpenAI-compatible `/v1/responses` provider (default) |
+| `chat-completions` | `ChatCompletionsApiModelHandler` | OpenAI-compatible `/v1/chat/completions` — prefer when Responses API streaming tool-calls are unreliable |
+
+---
+
+## Shared arguments
+
+These flags apply across all four backends:
+
+<ParamField path="--model_name" type="str" default="Qwen/Qwen3-4B-Instruct-2507">
+  The model to load or the model ID to send to the API. For local backends this is a Hugging Face Hub model ID or a local path; for API backends it is the model string the provider expects (e.g. `gpt-4o-mini`, `gpt-5.4-mini`).
+</ParamField>
+
+<ParamField path="--chat_size" type="int" default="30">
+  Number of assistant–user turn pairs to keep in the rolling context window. When the chat exceeds this size, older turns are compacted (summarised) in the background by `compact_history`.
+</ParamField>
+
+<ParamField path="--init_chat_prompt" type="str" default="You are a helpful and friendly AI assistant. You are polite, respectful, and aim to provide concise responses of less than 20 words.">
+  The system prompt injected at the start of every conversation. Override this to change the assistant's persona or behaviour.
+</ParamField>
+
+<ParamField path="--enable_lang_prompt" type="bool" default="False">
+  When `True`, appends a `"Please reply to my message in <language>"` instruction after each user turn when the detected language is known. Helps smaller models stay in the correct language when `--language auto` is used. Large models typically infer the language from context without this flag.
+</ParamField>
+
+<ParamField path="--stream_batch_sentences" type="int" default="3">
+  Number of complete sentences to accumulate before yielding a batch to the TTS stage. Set to `1` for sentence-by-sentence streaming; higher values reduce TTS cold-start overhead at the cost of slightly higher latency to first audio.
+</ParamField>
+
+<ParamField path="--compact_history" type="bool" default="True">
+  When `True`, older turns are summarised in the background by an extra LLM call once `chat_size` is exceeded, instead of being evicted synchronously. Keeps the context coherent over long conversations.
+</ParamField>
+
+---
+
+## `transformers` — local CUDA/CPU inference
+
+`LanguageModelHandler` loads the model with `AutoModelForCausalLM` and streams tokens via a `TextIteratorStreamer` running in a background thread.
+
+**Backend-specific arguments (prefix `--llm_`):**
+
+| Argument | Default | Description |
+|---|---|---|
+| `--llm_device` | `cuda` | Device: `cuda`, `cpu`, `mps` |
+| `--llm_torch_dtype` | `float16` | Precision: `float16`, `bfloat16`, `float32` |
+| `--llm_gen_max_new_tokens` | `1024` | Maximum tokens per response |
+| `--llm_gen_min_new_tokens` | `0` | Minimum tokens per response |
+| `--llm_gen_temperature` | `0.0` | Sampling temperature; `0` = deterministic |
+| `--llm_gen_do_sample` | `False` | Enable sampling; `False` = greedy |
+| `--llm_is_vlm` | `False` | Set `True` for vision-language models (loads `AutoModelForImageTextToText`) |
+
+<Tabs>
+  <Tab title="CUDA">
+    ```bash
+    speech-to-speech \
+        --stt parakeet-tdt \
+        --llm_backend transformers \
+        --tts qwen3 \
+        --model_name Qwen/Qwen3-4B-Instruct-2507 \
+        --llm_device cuda \
+        --llm_torch_dtype float16 \
+        --enable_live_transcription
+    ```
+  </Tab>
+  <Tab title="CPU">
+    ```bash
+    speech-to-speech \
+        --stt parakeet-tdt \
+        --llm_backend transformers \
+        --tts qwen3 \
+        --model_name Qwen/Qwen3-4B-Instruct-2507 \
+        --llm_device cpu \
+        --llm_torch_dtype float32
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `mlx-lm` — Apple Silicon
+
+Same `LanguageModelHandler`, but the `backend` is set to `mlx` internally. The model is loaded with `mlx_lm.load()` and generation uses `mlx_lm.stream_generate()`. Requires `pip install "speech-to-speech[mlx-lm]"`.
+
+Uses the same `--llm_*` argument prefix as `transformers`.
+
+<Tabs>
+  <Tab title="Apple Silicon (optimal settings)">
+    ```bash
+    speech-to-speech \
+        --local_mac_optimal_settings \
+        --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+    ```
+  </Tab>
+  <Tab title="Manual">
+    ```bash
+    speech-to-speech \
+        --stt parakeet-tdt \
+        --llm_backend mlx-lm \
+        --tts qwen3 \
+        --qwen3_tts_mlx_quantization 6bit \
+        --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
+        --enable_live_transcription
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `responses-api` — OpenAI-compatible Responses API
+
+`ResponsesApiModelHandler` calls the `/v1/responses` endpoint of any provider that implements the OpenAI Responses API protocol. This is the **default backend** and requires no local GPU.
+
+### Supported providers
+
+| Provider | `--responses_api_base_url` | `--responses_api_api_key` |
+|---|---|---|
+| OpenAI | *(omit — uses OpenAI default)* | `$OPENAI_API_KEY` |
+| HF Inference Providers | `https://router.huggingface.co/v1` | `$HF_TOKEN` |
+| OpenRouter | `https://openrouter.ai/api/v1` | `$OPENROUTER_API_KEY` |
+| vLLM (local) | `http://localhost:8000/v1` | *(omit or any string)* |
+| llama.cpp (local) | `http://localhost:8080/v1` | *(omit or any string)* |
+
+### responses-api arguments
+
+<ParamField path="--responses_api_api_key" type="str" default="None">
+  API key for the provider. Falls back to the `OPENAI_API_KEY` environment variable when unset. For local servers (vLLM, llama.cpp), pass any non-empty string.
+</ParamField>
+
+<ParamField path="--responses_api_base_url" type="str" default="None">
+  Base URL of the OpenAI-compatible endpoint. Omit to use the OpenAI default (`https://api.openai.com/v1`).
+</ParamField>
+
+<ParamField path="--responses_api_stream" type="bool" default="True">
+  Stream tokens as they are generated. Strongly recommended for low-latency voice; disabling it blocks until the full response is ready.
+</ParamField>
+
+<ParamField path="--responses_api_disable_thinking" type="bool" default="True">
+  Sends `chat_template_kwargs.enable_thinking=false` on the Responses API request to suppress chain-of-thought reasoning tokens for providers that support it (e.g. Together + Qwen3.5 models). Disabling thinking reduces latency significantly for voice use cases.
+</ParamField>
+
+<Tabs>
+  <Tab title="OpenAI">
+    ```bash
+    export OPENAI_API_KEY=sk-...
+    speech-to-speech \
+        --stt parakeet-tdt \
+        --llm_backend responses-api \
+        --tts qwen3 \
+        --model_name gpt-4o-mini \
+        --responses_api_stream \
+        --enable_live_transcription
+    ```
+  </Tab>
+  <Tab title="HF Inference Providers">
+    ```bash
+    # Qwen3.5-9B via Together
+    speech-to-speech \
+        --stt parakeet-tdt \
+        --llm_backend responses-api \
+        --tts qwen3 \
+        --qwen3_tts_mlx_quantization 6bit \
+        --model_name "Qwen/Qwen3.5-9B:together" \
+        --responses_api_base_url "https://router.huggingface.co/v1" \
+        --responses_api_api_key "$HF_TOKEN" \
+        --responses_api_stream \
+        --enable_live_transcription
+    ```
+  </Tab>
+  <Tab title="vLLM (local)">
+    ```bash
+    speech-to-speech \
+        --stt parakeet-tdt \
+        --llm_backend responses-api \
+        --tts qwen3 \
+        --model_name Qwen/Qwen3-4B-Instruct-2507 \
+        --responses_api_base_url "http://localhost:8000/v1" \
+        --responses_api_stream
+    ```
+  </Tab>
+  <Tab title="DeepSeek">
+    ```bash
+    speech-to-speech \
+        --stt parakeet-tdt \
+        --llm_backend responses-api \
+        --tts qwen3 \
+        --model_name deepseek-chat \
+        --responses_api_base_url https://api.deepseek.com \
+        --responses_api_api_key "$DEEPSEEK_API_KEY" \
+        --responses_api_stream
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `chat-completions` — OpenAI Chat Completions API
+
+`ChatCompletionsApiModelHandler` targets `/v1/chat/completions` instead of `/v1/responses`. It reuses **all** `--responses_api_*` connection flags (base URL, API key, stream, disable_thinking) and adds one extra argument.
+
+Prefer `chat-completions` over `responses-api` when:
+- The provider ignores `chat_template_kwargs.enable_thinking` on the Responses path and needs a `reasoning_effort` knob to suppress reasoning.
+- The server's Responses-API streaming tool-call path is unreliable (e.g. some vLLM builds), while its Chat Completions tool-call streaming works correctly.
+
+<ParamField path="--responses_api_reasoning_effort" type="str" default="None">
+  Provider-specific reasoning level sent as `extra_body={"reasoning_effort": <value>}` on the Chat Completions request. Use values like `"none"` or `"low"` to disable reasoning on providers where `chat_template_kwargs.enable_thinking` has no effect. When unset, the `--responses_api_disable_thinking` behaviour applies.
+</ParamField>
+
+<Tabs>
+  <Tab title="vLLM + Qwen tool calling">
+    ```bash
+    speech-to-speech \
+        --mode realtime \
+        --stt parakeet-tdt \
+        --llm_backend chat-completions \
+        --tts qwen3 \
+        --model_name Qwen/Qwen3-4B-Instruct-2507 \
+        --responses_api_base_url "http://localhost:8000/v1" \
+        --responses_api_stream
+    ```
+  </Tab>
+  <Tab title="Gemma via HF router">
+    ```bash
+    speech-to-speech \
+        --mode realtime \
+        --stt parakeet-tdt \
+        --llm_backend chat-completions \
+        --tts qwen3 \
+        --model_name "google/gemma-4-31B-it:cerebras" \
+        --responses_api_base_url "https://router.huggingface.co/v1" \
+        --responses_api_api_key "$HF_TOKEN" \
+        --responses_api_reasoning_effort none \
+        --responses_api_stream
+    ```
+  </Tab>
+  <Tab title="llama.cpp (local)">
+    ```bash
+    speech-to-speech \
+        --stt parakeet-tdt \
+        --llm_backend chat-completions \
+        --tts qwen3 \
+        --model_name my-local-model \
+        --responses_api_base_url "http://localhost:8080/v1" \
+        --responses_api_stream
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Generation parameter overrides
+
+Any generation parameter can be set with the `--llm_gen_<param>` prefix for local backends:
+
+```bash
+# Temperature and sampling for local transformers/mlx-lm
+--llm_gen_temperature 0.7
+--llm_gen_do_sample True
+--llm_gen_max_new_tokens 512
+```
+
+<Tip>
+  For the lowest possible voice latency on API backends, keep `--chat_size` small (default 30 is fine), enable `--responses_api_stream`, and keep `--responses_api_disable_thinking True`. Thinking tokens add hundreds of milliseconds before the first audio chunk is produced.
+</Tip>

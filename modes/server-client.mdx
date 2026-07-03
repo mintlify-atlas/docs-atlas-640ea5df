@@ -1,0 +1,148 @@
+---
+title: "Server/Client Mode: Stream Audio Over TCP"
+sidebarTitle: "Server/Client"
+description: "Run the pipeline on a GPU server and stream microphone/speaker audio from any machine using TCP sockets."
+---
+
+Server/Client mode splits the pipeline across two processes: the server runs VAD, STT, LLM, and TTS on a remote machine (or a GPU workstation on your local network), while the client captures microphone audio and plays back the generated speech locally. Audio travels over two persistent TCP socket connections — one for each direction — using raw 16 kHz, int16, mono PCM. This mode is ideal when you want GPU-accelerated inference on a server but need the audio I/O to happen on a laptop or a different endpoint.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  CLIENT  (scripts/listen_and_play.py)                           │
+│                                                                 │
+│  Microphone → send_socket → :12345 ──────────────────────────► │
+│                                                                 │
+│  Speaker   ← recv_socket ← :12346 ◄────────────────────────── │
+└─────────────────────────────────────────────────────────────────┘
+                          │ TCP │ TCP │
+┌─────────────────────────────────────────────────────────────────┐
+│  SERVER  (speech-to-speech)                                     │
+│                                                                 │
+│  SocketReceiver (:12345) → VAD → STT → LLM → TTS               │
+│                                                                 │
+│  SocketSender   (:12346) ←────────────────────────────────────  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Starting the Server
+
+Bind both sockets to all interfaces so the client can reach them from any IP:
+
+```bash
+speech-to-speech --recv_host 0.0.0.0 --send_host 0.0.0.0
+```
+
+This implicitly uses `--mode socket`. The mode argument can also be given explicitly:
+
+```bash
+speech-to-speech \
+    --mode socket \
+    --recv_host 0.0.0.0 \
+    --recv_port 12345 \
+    --send_host 0.0.0.0 \
+    --send_port 12346
+```
+
+The server waits on both ports for a client connection before the pipeline begins processing.
+
+## Running the Client
+
+Install `sounddevice` and `transformers` on the client machine, then run:
+
+```bash
+python scripts/listen_and_play.py --host <IP address of your server>
+```
+
+The script connects two sockets — one to `recv_port` (12345) to send microphone data, and one to `send_port` (12346) to receive generated audio — and bridges them to `sounddevice` streams.
+
+### Client Arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--host` | `localhost` | Server hostname or IP address |
+| `--send_port` | `12345` | Port to send microphone audio to |
+| `--recv_port` | `12346` | Port to receive generated audio from |
+| `--send_rate` | `16000` | Microphone sample rate in Hz |
+| `--recv_rate` | `16000` | Speaker sample rate in Hz |
+| `--list_play_chunk_size` | `1024` | Size of each audio chunk in bytes |
+
+## Socket Ports Reference
+
+| Socket | Default Port | Direction | Purpose |
+|---|---|---|---|
+| `SocketReceiver` | `12345` | Client → Server | Microphone audio from client to VAD |
+| `SocketSender` | `12346` | Server → Client | Generated TTS audio from server to speakers |
+
+Override the defaults with `--recv_port` and `--send_port` on the server, and `--send_port` / `--recv_port` on the client script.
+
+## Audio Format
+
+Both sockets carry the same raw PCM format:
+
+- **Sample rate**: 16,000 Hz
+- **Bit depth**: 16-bit signed integer (`int16`)
+- **Channels**: mono (1 channel)
+- **Chunk size**: 1,024 bytes (server default); configurable with `--chunk_size`
+
+The client streams at the same 16 kHz rate. The server's `SocketReceiver` calls `receive_full_chunk` in a loop so TCP segment boundaries never produce partial chunks.
+
+## LLM Backend Examples
+
+<Tabs>
+  <Tab title="Responses API (default)">
+    ```bash
+    # Server
+    speech-to-speech \
+        --recv_host 0.0.0.0 \
+        --send_host 0.0.0.0 \
+        --llm_backend responses-api \
+        --model_name gpt-4o-mini \
+        --responses_api_api_key "$OPENAI_API_KEY" \
+        --responses_api_stream
+
+    # Client
+    python scripts/listen_and_play.py --host 192.168.1.42
+    ```
+  </Tab>
+  <Tab title="vLLM (local server)">
+    ```bash
+    # Server
+    speech-to-speech \
+        --recv_host 0.0.0.0 \
+        --send_host 0.0.0.0 \
+        --llm_backend chat-completions \
+        --model_name "Qwen/Qwen3-4B-Instruct-2507" \
+        --responses_api_base_url "http://localhost:8000/v1" \
+        --responses_api_stream
+
+    # Client
+    python scripts/listen_and_play.py --host 192.168.1.42
+    ```
+  </Tab>
+  <Tab title="Transformers (CUDA)">
+    ```bash
+    # Server — with Torch Compile for Whisper
+    speech-to-speech \
+        --recv_host 0.0.0.0 \
+        --send_host 0.0.0.0 \
+        --stt parakeet-tdt \
+        --llm_backend transformers \
+        --tts qwen3 \
+        --model_name "Qwen/Qwen3-4B-Instruct-2507" \
+        --enable_live_transcription
+
+    # Client
+    python scripts/listen_and_play.py --host 192.168.1.42
+    ```
+  </Tab>
+</Tabs>
+
+## Timeout and Stuck-Pipeline Safety
+
+`SocketReceiver` includes a 30-second safety timeout: if `should_listen` remains cleared for longer than 30 seconds — indicating that the LLM or TTS handler may have crashed — the receiver automatically re-enables listening so the user is not permanently locked out. A warning is logged when this happens.
+
+<Warning>
+  The server blocks on `socket.accept()` for each port and only accepts **one client at a time**. For multi-client or browser-based scenarios, use [WebSocket mode](/modes/websocket) or [Realtime mode](/modes/realtime) instead.
+</Warning>

@@ -1,0 +1,262 @@
+---
+title: "Configure Multi-Language Voice Conversations"
+sidebarTitle: "Multi-Language"
+description: "Set up per-utterance language detection and fixed-language modes for English, French, Spanish, Chinese, Japanese, Korean, and more."
+---
+
+Speech-to-Speech supports both fixed single-language sessions and dynamic per-utterance language switching. The `--language` flag controls the language the STT passes to the rest of the pipeline, and the optional `--enable_lang_prompt` flag appends an explicit reply-language instruction to the LLM context for smaller models that do not pick up the language from context alone.
+
+## Supported languages
+
+The range of supported languages depends on which STT backend you choose.
+
+| STT Backend | Language support |
+|---|---|
+| Whisper (all variants) | English (`en`), French (`fr`), Spanish (`es`), Chinese (`zh`), Korean (`ko`), Japanese (`ja`), Hindi (`hi`), and many more |
+| Parakeet TDT 0.6B v3 | 25+ European languages (auto-detected or forced via `--parakeet_tdt_language`) |
+| MLX Audio Whisper | Same as Whisper (runs `mlx-community/whisper-*` models) |
+| Paraformer (FunASR) | Defaults to Chinese; not designed for per-utterance language switching |
+
+For multilingual TTS, ChatTTS and FacebookMMS cover a range of languages. Qwen3-TTS, Kokoro, and Pocket TTS are primarily English-focused.
+
+---
+
+## The `--language` flag
+
+<Steps>
+
+### Fixed ISO code
+
+Pass a BCP-47/ISO 639-1 code to lock the pipeline to a single language for the entire session. The STT will transcribe in that language and pass the code downstream so the LLM and TTS can respond accordingly.
+
+```bash
+# English (default)
+speech-to-speech \
+    --stt whisper \
+    --language en \
+    --llm_backend responses-api \
+    --model_name gpt-4o-mini
+
+# French
+speech-to-speech \
+    --stt whisper \
+    --language fr \
+    --llm_backend mlx-lm \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+
+# Chinese
+speech-to-speech \
+    --stt whisper-mlx \
+    --stt_model_name large-v3 \
+    --language zh \
+    --llm_backend mlx-lm \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+```
+
+### Automatic per-utterance detection
+
+Set `--language auto` to let the STT detect the language of each spoken utterance independently. The detected language code is forwarded to the LLM and TTS on every turn, enabling mid-session language switches:
+
+```bash
+speech-to-speech \
+    --stt parakeet-tdt \
+    --language auto \
+    --llm_backend mlx-lm \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+```
+
+</Steps>
+
+---
+
+## Per-utterance language detection in detail
+
+When `--language auto` is set, the STT handler detects the spoken language for each speech segment and attaches the result to the transcript. That language code travels through the pipeline:
+
+1. **STT** → detects language, emits `(text, language_code)` tuple
+2. **LLM** → receives the detected language; optionally prepends a reply instruction
+3. **TTS** → receives the language code and adapts synthesis if the backend supports it (e.g. FacebookMMS dynamically loads per-language model weights)
+
+### STT backends that support `--language auto`
+
+| Backend | `--language auto` support |
+|---|---|
+| `whisper` | ✅ Built-in Whisper language detection |
+| `whisper-mlx` | ✅ Lightning Whisper MLX language detection |
+| `mlx-audio-whisper` | ✅ MLX Audio Whisper language detection |
+| `parakeet-tdt` | ✅ Parakeet TDT 0.6B v3 (25+ European languages) |
+| `paraformer` | ❌ Defaults to Chinese; no per-utterance switching |
+
+<Note>
+Paraformer (FunASR) is optimised for Mandarin Chinese. Pass `--language zh` when using it rather than `--language auto`.
+</Note>
+
+---
+
+## The `--enable_lang_prompt` flag
+
+By default, the LLM receives the detected language code but no explicit instruction to reply in that language. Large models typically infer the reply language from the user's utterance. For smaller models that may not stay in the right language reliably, pass `--enable_lang_prompt`:
+
+```bash
+speech-to-speech \
+    --stt parakeet-tdt \
+    --language auto \
+    --enable_lang_prompt \
+    --llm_backend mlx-lm \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+```
+
+When this flag is active, the pipeline prepends a `"Please reply to my message in <language>"` instruction to each LLM prompt. `--enable_lang_prompt` defaults to `False` because it adds tokens to every request and is unnecessary for capable models.
+
+---
+
+## Single-language examples
+
+<Tabs>
+  <Tab title="English">
+    ```bash
+    speech-to-speech \
+        --stt parakeet-tdt \
+        --language en \
+        --llm_backend responses-api \
+        --model_name gpt-4o-mini \
+        --responses_api_api_key "$OPENAI_API_KEY"
+    ```
+  </Tab>
+  <Tab title="French">
+    ```bash
+    speech-to-speech \
+        --stt whisper \
+        --language fr \
+        --llm_backend mlx-lm \
+        --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+    ```
+  </Tab>
+  <Tab title="Chinese">
+    ```bash
+    speech-to-speech \
+        --stt whisper-mlx \
+        --stt_model_name large-v3 \
+        --language zh \
+        --llm_backend mlx-lm \
+        --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+    ```
+  </Tab>
+  <Tab title="Spanish">
+    ```bash
+    speech-to-speech \
+        --stt whisper \
+        --language es \
+        --llm_backend responses-api \
+        --model_name gpt-4o-mini \
+        --responses_api_api_key "$OPENAI_API_KEY"
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Auto-detection examples
+
+### Server mode
+
+For automatic language detection on the server with the default Parakeet TDT STT:
+
+```bash
+speech-to-speech \
+    --stt parakeet-tdt \
+    --language auto \
+    --llm_backend mlx-lm \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+```
+
+### Mac local mode
+
+Use `--local_mac_optimal_settings` as a base and override only the language-related flags. Note that `--stt parakeet-tdt` is already the default under `--local_mac_optimal_settings`, but if you need broader language coverage beyond the 25 European languages Parakeet TDT supports, switch to Whisper:
+
+```bash
+# Auto-detect with Parakeet TDT (25+ European languages)
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --stt parakeet-tdt \
+    --language auto \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+
+# Auto-detect with Whisper large-v3 for broader language coverage
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --stt whisper-mlx \
+    --stt_model_name large-v3 \
+    --language auto \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+```
+
+---
+
+## Multilingual TTS backends
+
+<Accordion title="ChatTTS">
+ChatTTS supports multilingual generation and is a good option for mixed-language or Asian-language conversations. Select it with `--tts chatTTS`.
+
+```bash
+speech-to-speech \
+    --stt whisper \
+    --language auto \
+    --llm_backend responses-api \
+    --model_name gpt-4o-mini \
+    --tts chatTTS
+```
+</Accordion>
+
+<Accordion title="FacebookMMS">
+FacebookMMS loads a separate language-specific model checkpoint for each language. The handler maps ISO 639-1 codes to Facebook MMS model suffixes (e.g. `en` → `facebook/mms-tts-eng`, `fr` → `facebook/mms-tts-fra`). When `--language auto` is active and a new language is detected, the handler swaps model weights at runtime.
+
+```bash
+speech-to-speech \
+    --stt whisper \
+    --language auto \
+    --llm_backend responses-api \
+    --model_name gpt-4o-mini \
+    --tts facebookMMS
+```
+
+If an unsupported language is detected, FacebookMMS falls back to English automatically.
+</Accordion>
+
+---
+
+## Language code reference
+
+The codes below are the values accepted by `--language`. Use them with `--stt whisper` or `--stt whisper-mlx` for the broadest coverage.
+
+| ISO code | Language |
+|---|---|
+| `en` | English |
+| `fr` | French |
+| `es` | Spanish |
+| `zh` | Chinese |
+| `ko` | Korean |
+| `ja` | Japanese |
+| `hi` | Hindi |
+| `ar` | Arabic |
+| `de` | German |
+| `pt` | Portuguese |
+| `ru` | Russian |
+| `it` | Italian |
+| `nl` | Dutch |
+| `pl` | Polish |
+| `tr` | Turkish |
+| `vi` | Vietnamese |
+| `th` | Thai |
+| `id` | Indonesian |
+| `sv` | Swedish |
+| `fi` | Finnish |
+| `uk` | Ukrainian |
+| `ro` | Romanian |
+| `hu` | Hungarian |
+| `el` | Greek |
+| `he` | Hebrew |
+
+<Tip>
+When building a bilingual assistant (e.g. English + Chinese), use `--language auto` combined with a Whisper `large-v3` STT model and a multilingual LLM such as Qwen3. This gives the best detection accuracy across both scripts.
+</Tip>

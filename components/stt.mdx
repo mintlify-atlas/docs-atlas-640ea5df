@@ -1,0 +1,301 @@
+---
+title: "Speech-to-Text Backends and Configuration"
+sidebarTitle: "STT"
+description: "Six STT backends — Whisper, Lightning Whisper MLX, MLX Audio Whisper, Faster-Whisper, Parakeet TDT, and Paraformer — selectable with the --stt flag."
+---
+
+The speech-to-speech pipeline supports six Speech-to-Text backends that cover the full spectrum from cloud-free local inference on Apple Silicon to high-accuracy multilingual transcription on CUDA. Select a backend with `--stt`; all other STT parameters follow an `--<handler_prefix>_*` naming convention described below.
+
+## Backend selection
+
+| `--stt` value | Handler class | Best for |
+|---|---|---|
+| `whisper` | `WhisperSTTHandler` | Any Whisper checkpoint on Hugging Face Hub via Transformers |
+| `whisper-mlx` | `LightningWhisperSTTHandler` | Fast Whisper inference on Apple Silicon via Lightning Whisper MLX |
+| `mlx-audio-whisper` | `MLXAudioWhisperSTTHandler` | Fast Whisper on Apple Silicon via mlx-audio |
+| `faster-whisper` | `FasterWhisperSTTHandler` | CTranslate2-accelerated Whisper on CUDA/CPU |
+| `parakeet-tdt` | `ParakeetTDTSTTHandler` | Default; streaming ASR on Apple Silicon (MLX) and CUDA (nano-parakeet) |
+| `paraformer` | `ParaformerSTTHandler` | Chinese-optimized FunASR Paraformer model |
+
+The **default backend is `parakeet-tdt`**. It is the only STT backend included in the standard `pip install speech-to-speech` install. All other backends require an optional extra or a separate install.
+
+---
+
+## Language support matrix
+
+| Backend | Supported languages | Auto-detect |
+|---|---|---|
+| `whisper` | en, fr, es, zh, ja, ko, hi, de, pt, pl, it, nl (+ fallback) | ✅ (`--language auto`) |
+| `whisper-mlx` | en, fr, es, zh, ja, ko, hi, de, pt, pl, it, nl | ✅ |
+| `mlx-audio-whisper` | en, fr, es, zh, ja, ko, hi, de, pt, pl, it, nl | ✅ |
+| `faster-whisper` | Depends on checkpoint; gen arg `--faster_whisper_stt_gen_language` | Depends on model |
+| `parakeet-tdt` | 25 European languages (en, de, fr, es, it, pt, nl, pl, ru, uk, cs, sk, hu, ro, bg, hr, sl, sr, da, no, sv, fi, et, lv, lt) | ✅ (lingua-py) |
+| `paraformer` | Depends on FunASR checkpoint; default `paraformer-zh` is Chinese | ❌ |
+
+Use `--language <code>` to fix the language or `--language auto` to enable per-utterance language detection. Pass `--enable_lang_prompt` to append a `"Please reply to my message in <language>"` instruction to the LLM so smaller models stay in the detected language.
+
+---
+
+## Live transcription flags
+
+Two flags enable in-stream partial transcription (Parakeet TDT and Paraformer support this natively):
+
+```bash
+--enable_live_transcription           # emit PartialTranscription messages during speech
+--live_transcription_update_interval  # seconds between progressive STT calls (default 0.5)
+```
+
+When `--enable_live_transcription` is set, the VAD stage emits `VADAudio(mode="progressive")` chunks at `--realtime_processing_pause` intervals, the STT handler transcribes them, and the realtime server forwards partial transcripts as `conversation.item.input_audio_transcription.delta` WebSocket events.
+
+---
+
+## Argument prefix pattern
+
+STT parameters follow the `--<handler_prefix>_*` naming convention, with generation parameters under `--<handler_prefix>_gen_*`. The prefix for each backend is:
+
+| Backend | Argument prefix | Example |
+|---|---|---|
+| `whisper` | `--stt_` | `--stt_model_name distil-whisper/distil-large-v3` |
+| `whisper-mlx` | `--stt_` | `--stt_model_name large-v3` |
+| `mlx-audio-whisper` | `--mlx_audio_whisper_` | `--mlx_audio_whisper_model_name mlx-community/whisper-large-v3-turbo` |
+| `faster-whisper` | `--faster_whisper_stt_` | `--faster_whisper_stt_model_name large-v3` |
+| `parakeet-tdt` | `--parakeet_tdt_` | `--parakeet_tdt_language de` |
+| `paraformer` | `--paraformer_stt_` | `--paraformer_stt_model_name paraformer-zh` |
+
+---
+
+## Per-backend details
+
+<Accordion title="whisper — Transformers Whisper">
+
+**Handler:** `WhisperSTTHandler`
+
+Loads any Whisper-compatible checkpoint from the Hugging Face Hub via the Transformers library. Supports `distil-whisper/distil-large-v3` (default), `openai/whisper-large-v3`, and any other Whisper checkpoint.
+
+**Key arguments:**
+
+| Argument | Default | Description |
+|---|---|---|
+| `--stt_model_name` | `distil-whisper/distil-large-v3` | HuggingFace model ID |
+| `--stt_device` | `cuda` | Device: `cuda`, `cpu`, `mps` |
+| `--stt_torch_dtype` | `float16` | Precision: `float16`, `bfloat16`, `float32` |
+| `--stt_compile_mode` | `None` | `torch.compile` mode: `default`, `reduce-overhead`, `max-autotune` |
+| `--language` | `en` | Language code or `auto` for detection |
+| `--stt_gen_max_new_tokens` | `128` | Maximum tokens to generate |
+
+Language detection reads the `<\|lang\|>` token from the generated IDs. If the detected language is outside the supported list, the handler falls back to the last known language.
+
+<Tabs>
+  <Tab title="English (CUDA)">
+    ```bash
+    speech-to-speech \
+        --stt whisper \
+        --stt_model_name distil-whisper/distil-large-v3 \
+        --stt_device cuda \
+        --language en
+    ```
+  </Tab>
+  <Tab title="Auto-detect">
+    ```bash
+    speech-to-speech \
+        --stt whisper \
+        --stt_model_name openai/whisper-large-v3 \
+        --language auto
+    ```
+  </Tab>
+</Tabs>
+
+</Accordion>
+
+<Accordion title="whisper-mlx — Lightning Whisper MLX">
+
+**Handler:** `LightningWhisperSTTHandler`
+
+Uses [Lightning Whisper MLX](https://github.com/mustafaaljadery/lightning-whisper-mlx) for fast on-device Whisper inference on Apple Silicon. Uses the same `--stt_model_name` and `--language` flags as the standard Whisper backend.
+
+Language detection falls back to the last supported language when the model returns a code outside the supported list.
+
+<Tabs>
+  <Tab title="Apple Silicon">
+    ```bash
+    speech-to-speech \
+        --stt whisper-mlx \
+        --stt_model_name large-v3 \
+        --language auto \
+        --device mps
+    ```
+  </Tab>
+  <Tab title="Chinese">
+    ```bash
+    speech-to-speech \
+        --stt whisper-mlx \
+        --stt_model_name large-v3 \
+        --language zh \
+        --device mps
+    ```
+  </Tab>
+</Tabs>
+
+</Accordion>
+
+<Accordion title="mlx-audio-whisper — MLX Audio Whisper">
+
+**Handler:** `MLXAudioWhisperSTTHandler`
+
+Uses [mlx-audio](https://github.com/huggingface/mlx-audio) for Whisper inference on Apple Silicon. Model is controlled by `--mlx_audio_whisper_model_name`; language detection still uses the shared `--language` flag.
+
+<Tabs>
+  <Tab title="Default">
+    ```bash
+    speech-to-speech \
+        --stt mlx-audio-whisper \
+        --mlx_audio_whisper_model_name mlx-community/whisper-large-v3-turbo \
+        --language auto
+    ```
+  </Tab>
+</Tabs>
+
+</Accordion>
+
+<Accordion title="faster-whisper — CTranslate2 Whisper">
+
+**Handler:** `FasterWhisperSTTHandler`
+
+Uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2) for quantized, low-latency Whisper inference on CUDA or CPU. Language is set via the generation kwarg `--faster_whisper_stt_gen_language` rather than the shared `--language` flag.
+
+Install: `pip install "speech-to-speech[faster-whisper]"`
+
+**Key arguments:**
+
+| Argument | Default | Description |
+|---|---|---|
+| `--faster_whisper_stt_model_name` | `tiny.en` | Model: `tiny`, `base`, `small`, `medium`, `large-v3`, `distil-large-v3`, etc. |
+| `--faster_whisper_stt_device` | `auto` | Device: `cpu`, `cuda`, `auto` |
+| `--faster_whisper_stt_compute_type` | `auto` | Quantization: `int8`, `float16`, `bfloat16`, `auto`, etc. |
+| `--faster_whisper_stt_gen_language` | `en` | Language code for transcription |
+| `--faster_whisper_stt_gen_max_new_tokens` | `128` | Max tokens to generate |
+
+<Tabs>
+  <Tab title="CUDA">
+    ```bash
+    speech-to-speech \
+        --stt faster-whisper \
+        --faster_whisper_stt_model_name large-v3 \
+        --faster_whisper_stt_device cuda \
+        --faster_whisper_stt_compute_type float16 \
+        --faster_whisper_stt_gen_language en
+    ```
+  </Tab>
+  <Tab title="CPU (int8)">
+    ```bash
+    speech-to-speech \
+        --stt faster-whisper \
+        --faster_whisper_stt_model_name medium \
+        --faster_whisper_stt_device cpu \
+        --faster_whisper_stt_compute_type int8 \
+        --faster_whisper_stt_gen_language fr
+    ```
+  </Tab>
+</Tabs>
+
+</Accordion>
+
+<Accordion title="parakeet-tdt — NVIDIA Parakeet TDT (default)">
+
+**Handler:** `ParakeetTDTSTTHandler`
+
+NVIDIA Parakeet TDT 0.6B v3 is a 600 M-parameter multilingual ASR model supporting 25 European languages. It is the default STT backend and the only one bundled in the standard install.
+
+**Backend dispatch:**
+- **Apple Silicon (MPS):** loads `mlx-community/parakeet-tdt-0.6b-v3` via mlx-audio. Sub-100 ms latency per utterance.
+- **CUDA / CPU:** loads `nvidia/parakeet-tdt-0.6b-v3` via [nano-parakeet](https://github.com/huggingface/nano-parakeet) (pure PyTorch, no NeMo dependency).
+
+**Language detection** uses [lingua-py](https://github.com/pemistahl/lingua-py) on the transcribed text (text-based, not acoustic). For utterances shorter than 20 characters, lingua-py is skipped and the last known language is reused.
+
+**Key arguments:**
+
+| Argument | Default | Description |
+|---|---|---|
+| `--parakeet_tdt_model_name` | auto | Override default model ID |
+| `--parakeet_tdt_device` | `auto` | `auto`, `cuda`, `mps`, `cpu` |
+| `--parakeet_tdt_compute_type` | `float16` | `float16` or `float32` |
+| `--parakeet_tdt_language` | `None` | Fix language; omit for auto-detection |
+
+<Tabs>
+  <Tab title="Default (auto device)">
+    ```bash
+    speech-to-speech \
+        --stt parakeet-tdt
+    ```
+  </Tab>
+  <Tab title="With live transcription">
+    ```bash
+    speech-to-speech \
+        --stt parakeet-tdt \
+        --enable_live_transcription \
+        --live_transcription_update_interval 0.25
+    ```
+  </Tab>
+  <Tab title="Fixed language">
+    ```bash
+    speech-to-speech \
+        --stt parakeet-tdt \
+        --parakeet_tdt_language de
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  On Apple Silicon, Parakeet TDT shares the MLX execution context with MLX-backed TTS (e.g. Qwen3-TTS or Kokoro MLX). The handlers serialize access via an `MLXLockContext` to avoid contention.
+</Note>
+
+</Accordion>
+
+<Accordion title="paraformer — FunASR Paraformer">
+
+**Handler:** `ParaformerSTTHandler`
+
+Uses [FunASR](https://github.com/modelscope/FunASR) to load Paraformer models. The default model `paraformer-zh` is optimized for Mandarin Chinese. The handler supports live transcription via `PartialTranscription` messages.
+
+Install: `pip install "speech-to-speech[paraformer]"`
+
+**Key arguments:**
+
+| Argument | Default | Description |
+|---|---|---|
+| `--paraformer_stt_model_name` | `paraformer-zh` | FunASR model name or path |
+| `--paraformer_stt_device` | `cuda` | Device for inference |
+
+<Tabs>
+  <Tab title="Chinese (default)">
+    ```bash
+    speech-to-speech \
+        --stt paraformer \
+        --paraformer_stt_model_name paraformer-zh
+    ```
+  </Tab>
+</Tabs>
+
+</Accordion>
+
+---
+
+## Multi-language pipeline example
+
+```bash
+# Automatic language detection with Parakeet on Mac, MLX LLM
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --stt parakeet-tdt \
+    --language auto \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
+    --enable_lang_prompt
+
+# Override to Whisper large-v3 for broader language coverage (Chinese)
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --stt whisper-mlx \
+    --stt_model_name large-v3 \
+    --language zh \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+```

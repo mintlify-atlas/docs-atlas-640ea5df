@@ -1,0 +1,304 @@
+---
+title: "Add Tool Calling to Your Voice Agent"
+sidebarTitle: "Tool Calling"
+description: "Give your voice agent callable functions using prompt-engineered local LLMs or native OpenAI API tool calling over the Responses API."
+---
+
+Tool calling lets your voice agent execute Python functions during a conversation — querying data, controlling hardware, or triggering external services — and optionally speak the results back to the user. Speech-to-Speech supports two distinct tool-calling paths that share the same wire protocol for clients but differ internally depending on the LLM backend.
+
+## Two tool-calling paths
+
+<Tabs>
+  <Tab title="Local LLM (transformers / mlx-lm)">
+    When `--llm_backend transformers` or `--llm_backend mlx-lm` is active, there is no native function-calling protocol. Instead, the pipeline uses **prompt engineering**: tools are rendered as Python-style function stubs and injected into the system prompt. The model is instructed to wrap any tool invocations inside `<code>...</code>` delimiters.
+
+    **How it works:**
+
+    1. Tools defined via `session.update` are converted to `FunctionTool` objects (which extend `RealtimeFunctionTool` from the `openai` library).
+    2. `FunctionTool.to_code_prompt()` renders each tool as a `def name(arg: type) -> ...: """docstring"""` stub using `signature_from_schema()` to convert JSON Schema types to Python type annotations.
+    3. The stubs are injected into the system prompt via a Jinja2 template (`tool_prompt.py`), which tells the model to output tool calls as `<code>function_name(arg='value')</code>`.
+    4. After generation, the pipeline extracts `<code>` blocks with a regex, parses each `name(kwargs)` expression using Python's `ast` and `tokenize` modules, and validates arguments against the registered tool schema.
+    5. Valid parsed calls become `ResponseFunctionToolCall` objects with auto-generated `call_id`s.
+
+    **System prompt example (rendered by `build_tool_system_prompt`):**
+
+    ```
+    Available tools:
+
+    def get_weather(city: str, units: str = None):
+        """Get current weather for a city.
+
+        Args:
+            city: The city name to look up
+            units: Temperature units, either 'celsius' or 'fahrenheit'
+        """
+
+    To call a tool, put exactly one named-argument function call inside <code>...</code>:
+    <code>function_name(required_arg='value')</code>
+
+    Rules:
+    - You may say one brief natural sentence before the tool call; for slow information tools, briefly say that you will check.
+    - Use named arguments only; quote strings. Omit optional args instead of placeholder values.
+    - Only one tool call may appear in a response.
+    ```
+
+    **Model output:**
+
+    ```
+    Sure, let me check that for you. <code>get_weather(city='Paris', units='celsius')</code>
+    ```
+  </Tab>
+  <Tab title="OpenAI API (responses-api)">
+    When `--llm_backend responses-api` or `--llm_backend chat-completions` is active, tools are passed natively as the `tools=` parameter in `client.responses.create`. The API returns structured `function_call` items directly — no prompt engineering or regex parsing required.
+
+    Per-response `tool_choice` overrides from `response.create` events are forwarded to the API call, enabling fine-grained control over when tools are invoked.
+  </Tab>
+</Tabs>
+
+---
+
+## Defining tools via `session.update`
+
+Tools are registered through the `session.update` event, which accepts a JSON Schema `tools` array in the same format as the OpenAI Realtime API. Both local-LLM and API paths read from the same session config.
+
+```python
+conn.session.update(
+    session={
+        "instructions": "You are a helpful assistant with access to weather data.",
+        "tools": [
+            {
+                "type": "function",
+                "name": "get_weather",
+                "description": "Get the current weather for a city.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                            "description": "The city name to look up"
+                        },
+                        "units": {
+                            "type": "string",
+                            "enum": ["celsius", "fahrenheit"],
+                            "description": "Temperature units"
+                        }
+                    },
+                    "required": ["city"]
+                }
+            }
+        ],
+        "turn_detection": {"type": "server_vad", "interrupt_response": True},
+    }
+)
+```
+
+---
+
+## The tool call cycle
+
+When the model decides to call a tool, the server emits a `response.function_call_arguments.done` event containing the `call_id`, `name`, and JSON-encoded `arguments`. Your client executes the function, then sends the result back.
+
+<Steps>
+
+### Receive the tool call
+
+```python
+for event in conn:
+    if event.type == "response.function_call_arguments.done":
+        call_id = event.call_id
+        name = event.name
+        arguments = json.loads(event.arguments)
+        print(f"Tool called: {name}({arguments})")
+```
+
+### Execute the function locally
+
+```python
+        if name == "get_weather":
+            result = get_weather(**arguments)
+            result_str = json.dumps(result)
+```
+
+### Return the result with `conversation.item.create`
+
+Send the tool output back to the server. This injects the result into the LLM context but does **not** trigger a new generation automatically:
+
+```python
+        conn.conversation.item.create(
+            item={
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": result_str,
+            }
+        )
+```
+
+### Trigger follow-up generation (if needed)
+
+If the tool result should be spoken to the user, send `response.create` to kick off a new generation pass. The LLM will see the function output in context and synthesize a natural spoken answer:
+
+```python
+        conn.response.create()
+```
+
+</Steps>
+
+### Complete client example
+
+```python
+import json
+from openai import OpenAI
+
+def get_weather(city: str, units: str = "celsius") -> dict:
+    # Your real implementation here
+    return {"city": city, "temperature": 22, "units": units, "condition": "sunny"}
+
+client = OpenAI(base_url="http://localhost:8765/v1", api_key="not-needed")
+
+with client.beta.realtime.connect(model="model_name") as conn:
+    conn.session.update(
+        session={
+            "instructions": "You are a helpful weather assistant.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get current weather for a city.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string", "description": "City name"},
+                            "units": {
+                                "type": "string",
+                                "enum": ["celsius", "fahrenheit"],
+                                "description": "Temperature units",
+                            },
+                        },
+                        "required": ["city"],
+                    },
+                }
+            ],
+            "turn_detection": {"type": "server_vad", "interrupt_response": True},
+        }
+    )
+
+    for event in conn:
+        if event.type == "response.function_call_arguments.done":
+            call_id = event.call_id
+            name = event.name
+            arguments = json.loads(event.arguments)
+
+            # Execute the tool
+            if name == "get_weather":
+                result = get_weather(**arguments)
+                result_str = json.dumps(result)
+
+            # Return the result (injects into context, no generation yet)
+            conn.conversation.item.create(
+                item={
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": result_str,
+                }
+            )
+
+            # Trigger the spoken follow-up
+            conn.response.create()
+
+        elif event.type == "response.output_audio_transcript.done":
+            print(f"Assistant said: {event.transcript}")
+```
+
+---
+
+## Fire-and-forget vs. spoken results
+
+Not all tool calls need a spoken follow-up. The pattern depends on whether the action is purely mechanical or returns information the user should hear.
+
+<Tabs>
+  <Tab title="Fire-and-forget (robot / UI actions)">
+    For actions like triggering an LED, moving a robot joint, or playing a sound effect, the model already speaks a natural lead-in before invoking the tool (e.g. `"Sure, here's my best happy expression."`). After `conversation.item.create`, you do **not** need to call `response.create`.
+
+    ```python
+    if name in ("play_animation", "set_led_color", "move_head"):
+        execute_robot_action(name, arguments)
+
+        # Inject the result but do NOT call response.create()
+        conn.conversation.item.create(
+            item={
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": json.dumps({"status": "ok"}),
+            }
+        )
+        # No response.create() — the model already spoke before calling the tool.
+    ```
+  </Tab>
+  <Tab title="Data / search tools (spoken result)">
+    For tools that fetch data (camera query, web search, database lookup), the result must be spoken back. After injecting the output, call `response.create()`:
+
+    ```python
+    if name == "search_web":
+        result = search_web(arguments["query"])
+
+        conn.conversation.item.create(
+            item={
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": json.dumps(result),
+            }
+        )
+        # Trigger the spoken answer
+        conn.response.create()
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## `FunctionTool` and `to_code_prompt()`
+
+`FunctionTool` extends `RealtimeFunctionTool` from the `openai` library and adds a single extra method for the local-LLM prompt-engineering path:
+
+```python
+from speech_to_speech.LLM.tool_call.function_tool import FunctionTool
+
+tool = FunctionTool(
+    type="function",
+    name="get_weather",
+    description="Get current weather for a city.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "city": {"type": "string", "description": "The city name to look up"},
+            "units": {
+                "type": "string",
+                "enum": ["celsius", "fahrenheit"],
+                "description": "Temperature units",
+            },
+        },
+        "required": ["city"],
+    },
+)
+
+# Without arg descriptions (fewer tokens)
+print(tool.to_code_prompt(include_args_doc=False))
+
+# With arg descriptions (more tokens, better for small models)
+print(tool.to_code_prompt(include_args_doc=True))
+```
+
+### `include_args_doc` and token impact
+
+The `include_args_doc` parameter controls whether per-argument descriptions are included in the rendered docstring. This has a large effect on prompt size:
+
+| `include_args_doc` | Approx. tokens (Reachy Mini tool profile) |
+|---|---|
+| `False` | ~906 tokens |
+| `True` | ~3,434 tokens |
+
+Enable `include_args_doc=True` when working with smaller models that benefit from the extra context, or when argument names alone are not self-explanatory. Disable it (`False`) to reduce token usage and latency, especially for models with a limited context window or in latency-sensitive deployments.
+
+<Warning>
+The local-LLM tool-calling path is prompt-engineered and relies on the model correctly formatting output inside `<code>...</code>` delimiters. If you see tool calls being missed or parsed incorrectly, try a larger or instruction-tuned model, or switch to `--llm_backend responses-api` for native tool-call support.
+</Warning>

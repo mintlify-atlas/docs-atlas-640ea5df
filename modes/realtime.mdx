@@ -1,0 +1,269 @@
+---
+title: "Realtime Mode: OpenAI-Compatible Voice API"
+sidebarTitle: "Realtime"
+description: "Expose a WebSocket voice agent at /v1/realtime using the OpenAI Realtime protocol for low-latency turn-taking."
+---
+
+Realtime mode is the **default** operating mode for Speech to Speech. It starts a FastAPI/uvicorn server that exposes a WebSocket endpoint at `/v1/realtime`, fully compatible with the OpenAI Realtime API protocol. Any client that speaks the OpenAI Realtime protocol — the official Python SDK, a custom client, or a voice UI library — can connect and begin streaming audio immediately. The pipeline handles VAD, STT, LLM generation, and TTS in parallel threads, streaming audio back as base64-encoded PCM delta events.
+
+## Starting the Server
+
+Running `speech-to-speech` with no arguments launches realtime mode using Parakeet TDT for STT, the OpenAI Responses API for the LLM, and Qwen3-TTS for speech output:
+
+```bash
+speech-to-speech
+```
+
+This is equivalent to the explicit form:
+
+```bash
+speech-to-speech \
+    --thresh 0.6 \
+    --stt parakeet-tdt \
+    --llm_backend responses-api \
+    --tts qwen3 \
+    --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+    --qwen3_tts_speaker Aiden \
+    --qwen3_tts_language auto \
+    --qwen3_tts_backend ggml \
+    --qwen3_tts_non_streaming_mode True \
+    --qwen3_tts_mlx_quantization 6bit \
+    --model_name gpt-5.4-mini \
+    --chat_size 30 \
+    --responses_api_stream \
+    --enable_live_transcription \
+    --mode realtime
+```
+
+<Note>
+  The server binds to `0.0.0.0:8765` by default. The WebSocket endpoint is `ws://<host>:8765/v1/realtime`.
+</Note>
+
+## Server Configuration Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--ws_host` | `0.0.0.0` | Host IP address the WebSocket server binds to |
+| `--ws_port` | `8765` | Port the WebSocket server listens on |
+| `--num_pipelines` | `1` | Size of the isolated pipeline pool (max concurrent sessions) |
+| `--enable_live_transcription` | `true` | Stream partial user transcripts as `transcription.delta` events |
+
+### Binding to a custom host and port
+
+```bash
+speech-to-speech --mode realtime --ws_host 0.0.0.0 --ws_port 9000
+```
+
+### Concurrent session pool
+
+By default, only one WebSocket session is active at a time. Use `--num_pipelines` to create a pool of isolated VAD/STT/LLM/TTS handler chains so multiple clients can connect simultaneously. Connections beyond the pool size are rejected with a `session_limit_reached` error.
+
+```bash
+speech-to-speech --mode realtime --num_pipelines 4
+```
+
+## Connecting with the OpenAI Python Client
+
+Any client implementing the OpenAI Realtime protocol can connect. The official `openai` Python SDK works out of the box — point `base_url` at your server's HTTP address:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8765/v1", api_key="not-needed")
+
+with client.beta.realtime.connect(model="model_name") as conn:
+    conn.session.update(
+        session={
+            "instructions": "You are a helpful assistant.",
+            "turn_detection": {"type": "server_vad", "interrupt_response": True},
+        }
+    )
+
+    for event in conn:
+        print(event.type)
+```
+
+The companion script `scripts/listen_and_play_realtime.py` provides a ready-to-run microphone/speaker client:
+
+```bash
+python scripts/listen_and_play_realtime.py \
+    --host 127.0.0.1 \
+    --port 8765 \
+    --model local \
+    --instructions "You are a helpful assistant."
+```
+
+Additional flags for the script:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--voice` | *(none)* | TTS voice (e.g. `bm_fable` for Kokoro, `marin` for OpenAI) |
+| `--send-rate` | `16000` | Microphone sample rate in Hz |
+| `--recv-rate` | `16000` | Speaker sample rate in Hz |
+| `--chunk-size` | `1024` | Audio callback block size in samples |
+| `--print-json` | `false` | Print raw event payloads for debugging |
+| `--block-mic-during-playback` | `false` | Pause mic capture while audio is playing |
+
+## Session Configuration via `session.update`
+
+After connecting, send a `session.update` event to configure behaviour for the session. Settings deep-merge into the running `RuntimeConfig` and take effect on the next turn:
+
+```python
+conn.session.update(
+    session={
+        "instructions": "You are a concise assistant. Reply in one sentence.",
+        "turn_detection": {
+            "type": "server_vad",
+            "interrupt_response": True,
+        },
+        "tools": [
+            {
+                "type": "function",
+                "name": "get_weather",
+                "description": "Return current weather for a city.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"}
+                    },
+                    "required": ["city"],
+                },
+            }
+        ],
+    }
+)
+```
+
+## Live Transcription
+
+When `--enable_live_transcription` is set (the default), the server emits streaming partial transcripts while the user is speaking:
+
+- `conversation.item.input_audio_transcription.delta` — partial hypothesis, updated every ~500 ms
+- `conversation.item.input_audio_transcription.completed` — final transcript with duration usage
+
+```bash
+speech-to-speech --mode realtime --enable_live_transcription
+```
+
+## Barge-In and Interruption Handling
+
+Interruption (barge-in) is handled by a shared `CancelScope` object. When VAD detects the user speaking during assistant playback:
+
+<Steps>
+  <Step title="VAD emits speech_started">
+    The VAD places a `speech_started` event on the internal `text_output_queue`.
+  </Step>
+  <Step title="Send loop cancels the active response">
+    The `_send_loop` calls `cancel_scope.cancel()`, which increments the generation counter and sets a discard flag. The client receives `response.done` with `status="cancelled"` and `reason="turn_detected"`.
+  </Step>
+  <Step title="LLM and TTS abort">
+    Each handler captured the generation number at the start of the response. On every streaming token they call `cancel_scope.is_stale(gen)`, and immediately abort when the generation has been superseded.
+  </Step>
+  <Step title="Discard guard clears">
+    Stale audio/text arriving between `cancel()` and `__RESPONSE_DONE__` is silently dropped. The discard guard clears when `__RESPONSE_DONE__` arrives.
+  </Step>
+  <Step title="Pipeline processes the new utterance">
+    `should_listen` is re-enabled and the pipeline begins processing the user's new speech.
+  </Step>
+</Steps>
+
+The client can also cancel programmatically by sending a `response.cancel` event.
+
+## LLM Backend Examples
+
+<Tabs>
+  <Tab title="OpenAI (Responses API)">
+    ```bash
+    export OPENAI_API_KEY=sk-...
+    speech-to-speech \
+        --mode realtime \
+        --stt parakeet-tdt \
+        --llm_backend responses-api \
+        --tts qwen3 \
+        --model_name gpt-4o-mini \
+        --responses_api_stream \
+        --enable_live_transcription
+    ```
+  </Tab>
+  <Tab title="vLLM (local)">
+    ```bash
+    speech-to-speech \
+        --mode realtime \
+        --stt parakeet-tdt \
+        --llm_backend chat-completions \
+        --tts qwen3 \
+        --model_name "Qwen/Qwen3-4B-Instruct-2507" \
+        --responses_api_base_url "http://localhost:8000/v1" \
+        --responses_api_stream
+    ```
+  </Tab>
+  <Tab title="MLX-LM (Apple Silicon)">
+    ```bash
+    speech-to-speech \
+        --mode realtime \
+        --stt parakeet-tdt \
+        --llm_backend mlx-lm \
+        --tts kokoro \
+        --model_name "mlx-community/Qwen3-4B-Instruct-2507-bf16" \
+        --llm_device mps \
+        --enable_live_transcription
+    ```
+  </Tab>
+  <Tab title="HF Inference Providers">
+    ```bash
+    speech-to-speech \
+        --mode realtime \
+        --stt parakeet-tdt \
+        --llm_backend chat-completions \
+        --tts qwen3 \
+        --model_name "google/gemma-4-31B-it:cerebras" \
+        --responses_api_base_url "https://router.huggingface.co/v1" \
+        --responses_api_api_key "$HF_TOKEN" \
+        --responses_api_reasoning_effort none \
+        --responses_api_stream
+    ```
+  </Tab>
+  <Tab title="Transformers (local)">
+    ```bash
+    speech-to-speech \
+        --mode realtime \
+        --stt parakeet-tdt \
+        --llm_backend transformers \
+        --tts kokoro \
+        --model_name "Qwen/Qwen3-4B-Instruct-2507" \
+        --llm_device mps \
+        --llm_torch_dtype float16 \
+        --enable_live_transcription
+    ```
+  </Tab>
+</Tabs>
+
+## Supported OpenAI Realtime Events
+
+### Client → Server
+
+| Event | Description |
+|---|---|
+| `input_audio_buffer.append` | Stream base64 PCM audio. Decoded, resampled to 16 kHz, and chunked for VAD. |
+| `session.update` | Deep-merge session config (instructions, tools, voice, turn detection, audio format). |
+| `conversation.item.create` | Inject `input_text` or `function_call_output` into the LLM context without triggering generation. |
+| `response.create` | Trigger LLM generation. Supports per-response `instructions` and `tool_choice` overrides. |
+| `response.cancel` | Cancel the in-progress response and re-enable listening. |
+
+### Server → Client
+
+| Event | Description |
+|---|---|
+| `session.created` | Sent on connection with current session config. |
+| `error` | Protocol errors such as `session_limit_reached`, `unknown_or_invalid_event`, `invalid_session_type`. |
+| `input_audio_buffer.speech_started` | VAD detected user speech. |
+| `input_audio_buffer.speech_stopped` | End of user speech segment. |
+| `conversation.item.created` | Acknowledges injected `input_text` from `conversation.item.create`. |
+| `conversation.item.input_audio_transcription.delta` | Streaming partial transcript (when live transcription is enabled). |
+| `conversation.item.input_audio_transcription.completed` | Final transcript for the user turn with duration usage. |
+| `response.created` | Emitted on the first outbound audio chunk (response is `in_progress`). |
+| `response.output_audio.delta` | Base64 PCM audio chunk from TTS. |
+| `response.output_audio.done` | Audio stream complete for the current output item. |
+| `response.output_audio_transcript.done` | Full assistant text transcript for the turn. |
+| `response.function_call_arguments.done` | Tool call with `call_id`, `name`, and JSON `arguments`. |
+| `response.done` | Response finished: `completed`, `cancelled` with reason `turn_detected` or `client_cancelled`. |

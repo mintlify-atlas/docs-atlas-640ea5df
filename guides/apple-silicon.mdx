@@ -1,0 +1,235 @@
+---
+title: "Optimize Speech to Speech for Apple Silicon"
+sidebarTitle: "Apple Silicon"
+description: "Run the full pipeline natively on macOS using MLX-backed STT, LLM, and TTS for low-latency, GPU-accelerated voice conversations."
+---
+
+Apple Silicon Macs ship with a unified memory architecture that MLX is purpose-built to exploit. By routing the STT, LLM, and TTS stages entirely through the Metal Performance Shaders (MPS) device and the `mlx-audio` / `mlx-lm` libraries, you can run a fully local, low-latency voice agent without any cloud dependency or CUDA hardware.
+
+## Quick-start with `--local_mac_optimal_settings`
+
+The `--local_mac_optimal_settings` flag applies every Apple-Silicon-specific override in one shot so you do not have to remember the individual flags:
+
+```bash
+speech-to-speech --local_mac_optimal_settings
+```
+
+### What the flag sets
+
+| Setting | Value | Notes |
+|---|---|---|
+| `--device` | `mps` | All handlers default to the Metal GPU |
+| `--stt` | `parakeet-tdt` | MLX backend via `mlx-community/parakeet-tdt-0.6b-v3` |
+| `--llm_backend` | `mlx-lm` | Pure MLX LLM inference |
+| `--tts` | `qwen3` | `mlx-audio` backend, defaults to `6bit` quantization |
+| `--mode` | `local` | Local audio I/O (microphone + speakers) |
+
+### Full equivalent expansion
+
+The one-liner above is exactly equivalent to:
+
+```bash
+speech-to-speech \
+    --device mps \
+    --stt parakeet-tdt \
+    --llm_backend mlx-lm \
+    --tts qwen3 \
+    --qwen3_tts_mlx_quantization 6bit \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
+    --mode local \
+    --enable_live_transcription
+```
+
+You can pin a specific LLM while keeping everything else from the shortcut:
+
+```bash
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+```
+
+<Note>
+If you accidentally pass `--device cuda` on macOS the pipeline raises a `ValueError` immediately: `Cannot use CUDA on macOS. Please set the device to 'cpu' or 'mps'.` Use `--device mps` or omit `--device` entirely and let `--local_mac_optimal_settings` set it for you.
+</Note>
+
+---
+
+## TTS options on macOS
+
+Three TTS backends are actively supported on Apple Silicon. Qwen3-TTS is the default; Pocket TTS and Kokoro are opt-in alternatives.
+
+<Tabs>
+  <Tab title="Qwen3 (default)">
+    Qwen3-TTS uses the `mlx-audio` backend on macOS and streams audio in real time. The `--local_mac_optimal_settings` shortcut selects it automatically.
+
+    ```bash
+    speech-to-speech \
+        --local_mac_optimal_settings \
+        --tts qwen3 \
+        --qwen3_tts_mlx_quantization 6bit
+    ```
+  </Tab>
+  <Tab title="Pocket TTS">
+    Pocket TTS from Kyutai Labs provides streaming TTS with voice-cloning capabilities. Install the extra first:
+
+    ```bash
+    pip install "speech-to-speech[pocket]"
+    ```
+
+    ```bash
+    speech-to-speech \
+        --local_mac_optimal_settings \
+        --tts pocket \
+        --pocket_tts_voice jean \
+        --pocket_tts_device cpu
+    ```
+
+    Available voice presets: `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`.
+  </Tab>
+  <Tab title="Kokoro">
+    Kokoro-82M is optimized for fast, high-quality synthesis on Apple Silicon:
+
+    ```bash
+    pip install "speech-to-speech[kokoro]"
+    ```
+
+    ```bash
+    speech-to-speech \
+        --local_mac_optimal_settings \
+        --tts kokoro
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Qwen3-TTS MLX quantization options
+
+On Apple Silicon the `Qwen/*` model ID is automatically mapped to the matching `mlx-community/*` MLX variant. The default quantization is `6bit`, which offers a good balance between quality and memory footprint. Use `--qwen3_tts_mlx_quantization` to override it.
+
+| Quantization | Memory | Notes |
+|---|---|---|
+| `bf16` | Highest | Full precision; best quality |
+| `8bit` | High | Near-lossless |
+| `6bit` | Medium | **Default** — recommended for most M-series chips |
+| `4bit` | Low | Smallest model; audible quality drop on longer sentences |
+
+```bash
+# Explicit 6bit (default)
+speech-to-speech --local_mac_optimal_settings --qwen3_tts_mlx_quantization 6bit
+
+# Full precision bf16
+speech-to-speech --local_mac_optimal_settings --qwen3_tts_mlx_quantization bf16
+
+# Lowest memory footprint
+speech-to-speech --local_mac_optimal_settings --qwen3_tts_mlx_quantization 4bit
+```
+
+---
+
+## Selecting the MLX LLM model
+
+The default MLX LLM is `mlx-community/Qwen3-4B-Instruct-2507-bf16`. Any `mlx-community` model on the Hugging Face Hub can be swapped in via `--model_name`:
+
+```bash
+# Default 4B bf16
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+
+# Smaller 1.7B for lower memory / latency
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --model_name mlx-community/Qwen3-1.7B-Instruct-2507-bf16
+
+# Larger 8B for higher quality
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --model_name mlx-community/Qwen3-8B-Instruct-2507-bf16
+```
+
+All three LLM backends accept `mlx-community` models when `--llm_backend mlx-lm` is active. The `mlx-lm` extra is required if not installed already:
+
+```bash
+pip install "speech-to-speech[mlx-lm]"
+```
+
+---
+
+## The global MLX lock and `--num_pipelines`
+
+MLX models (STT, LLM, TTS) cannot run concurrently from multiple threads on Apple Silicon because Metal command buffers are not re-entrant. The pipeline manages this via a global reentrant lock (`mlx_lock.py`). Each handler acquires the lock before running inference and releases it immediately after.
+
+When you run more than one pipeline in parallel with `--num_pipelines > 1`, the progressive STT path (live transcription) competes heavily for the same MLX lock. This produces a flood of contention warnings without affecting final transcripts. The pipeline detects this situation at startup and **automatically disables live transcription** on macOS when `--num_pipelines > 1`:
+
+```
+MLX contention: --num_pipelines=2 > 1 on Apple Silicon → disabling live transcription
+(progressive STT contends on the global MLX lock)
+```
+
+If you need live transcription, keep `--num_pipelines 1` (the default). If you need multiple concurrent sessions, accept that live transcription will be disabled:
+
+```bash
+# Two concurrent realtime sessions — live transcription disabled automatically
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --mode realtime \
+    --num_pipelines 2
+```
+
+---
+
+## Running in realtime mode on Apple Silicon
+
+Realtime mode exposes an OpenAI Realtime-compatible WebSocket endpoint at `/v1/realtime`. Connect to it from any OpenAI Realtime-compatible client:
+
+```bash
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --mode realtime
+```
+
+Then connect from Python:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8765/v1", api_key="not-needed")
+
+with client.beta.realtime.connect(model="model_name") as conn:
+    conn.session.update(
+        session={
+            "instructions": "You are a helpful assistant.",
+            "turn_detection": {"type": "server_vad", "interrupt_response": True},
+        }
+    )
+
+    for event in conn:
+        print(event.type)
+```
+
+---
+
+## Benchmarking Qwen3-TTS MLX quantization variants
+
+Use `benchmark_tts.py` to measure latency and real-time factor (RTF) for each quantization level on your specific hardware before committing to a setting in production:
+
+```bash
+python scripts/benchmark_tts.py \
+    --handlers qwen3 \
+    --iterations 3 \
+    --qwen3_mlx_quantizations bf16 4bit 6bit 8bit
+```
+
+The script runs each variant independently, reports warmup time, average inference time, min/max/std, average audio duration, RTF, and time-to-first-chunk, then prints a sorted comparison table:
+
+```
+COMPARISON (Average Inference Time)
+================================================================================
+  qwen3[6bit]              : 0.8423s  (1.00x slower than fastest)
+  qwen3[4bit]              : 0.9107s  (1.08x slower than fastest)
+  qwen3[8bit]              : 1.1234s  (1.33x slower than fastest)
+  qwen3[bf16]              : 1.4501s  (1.72x slower than fastest)
+```
+
+Results are also saved to `tts_benchmark_results.json` for further analysis.

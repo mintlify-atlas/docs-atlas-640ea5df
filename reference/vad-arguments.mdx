@@ -1,0 +1,156 @@
+---
+title: "VADHandlerArguments: Voice Activity Detection"
+sidebarTitle: "VAD Args"
+description: "All VAD configuration flags for Silero VAD v5, including detection thresholds, timing windows, hysteresis, and optional audio enhancement."
+---
+
+`VADHandlerArguments` controls the Silero VAD v5 stage that sits at the front of every pipeline mode. The VAD listens to the audio stream continuously, segments it into speech chunks, and gates when STT and LLM processing begins. Tuning these flags has a direct impact on end-to-end latency, barge-in sensitivity, and false-positive suppression.
+
+All fields are passed without a prefix, for example `--thresh 0.5` or `--min_silence_ms 100`.
+
+## Fields
+
+<ParamField path="thresh" type="float" default="0.6">
+  Confidence threshold above which Silero VAD declares a frame as speech. Values range from `0.0` to `1.0`. Lower values increase sensitivity (more detections, potentially more false positives); higher values require stronger evidence of speech before triggering.
+
+  ```bash
+  speech-to-speech --thresh 0.5
+  ```
+</ParamField>
+
+<ParamField path="sample_rate" type="integer" default="16000">
+  Expected sample rate of the incoming audio in Hertz. The pipeline records and resamples all audio to 16 000 Hz before passing it to the VAD, so this should stay at its default unless you are providing audio at a different rate from an external source.
+
+  ```bash
+  speech-to-speech --sample_rate 16000
+  ```
+</ParamField>
+
+<ParamField path="min_silence_ms" type="integer" default="64">
+  Minimum length of a silence interval (in milliseconds) that causes the VAD to end the current speech segment. Shorter values yield lower latency but can prematurely cut sentences when there is a brief mid-sentence pause. Longer values tolerate natural pauses better but add latency before the STT begins.
+
+  ```bash
+  speech-to-speech --min_silence_ms 100
+  ```
+</ParamField>
+
+<ParamField path="min_speech_ms" type="integer" default="384">
+  Minimum duration of detected speech (in milliseconds) required before a segment is forwarded downstream. Frames of activity shorter than this threshold are discarded as noise. The default `384` ms is tuned to eliminate keyboard clicks and brief background sounds while accepting normal speech.
+
+  ```bash
+  speech-to-speech --min_speech_ms 384
+  ```
+</ParamField>
+
+<ParamField path="min_speech_continuation_ms" type="integer" default="192">
+  Hysteresis threshold for speech that continues a soft-ended, uncommitted turn that is still within the speculative reopen window. When the user resumes speaking after a soft-ended turn, this lower bar (rather than `min_speech_ms`) is used to accept the continuation fragment. The recommended pairing is `--min_speech_ms 384 --min_speech_continuation_ms 192`. Set to `0` to disable the split and always require `min_speech_ms`. Clamped internally to `[100, min_speech_ms]`. Barge-in detection is unaffected.
+
+  ```bash
+  speech-to-speech --min_speech_ms 384 --min_speech_continuation_ms 192
+  ```
+</ParamField>
+
+<ParamField path="max_speech_ms" type="float" default="inf">
+  Maximum length of a continuous speech segment in milliseconds before the VAD forces a split and forwards the accumulated audio downstream. The default is infinite, meaning very long utterances are never force-split. Set a finite value if you want to process long monologues in rolling chunks.
+
+  ```bash
+  speech-to-speech --max_speech_ms 10000
+  ```
+</ParamField>
+
+<ParamField path="speech_pad_ms" type="integer" default="500">
+  Amount of audio (in milliseconds) retained in a ring buffer before VAD triggers and prepended to detected speech segments. This ensures that the leading edge of an utterance — which may have been partially buffered before the VAD threshold was crossed — is included in the audio sent to STT.
+
+  ```bash
+  speech-to-speech --speech_pad_ms 300
+  ```
+</ParamField>
+
+<ParamField path="audio_enhancement" type="boolean" default="false">
+  When `true`, applies DeepFilterNet noise reduction, equalization, and echo cancellation to the audio before VAD processing. Can improve accuracy in noisy environments. Requires `numpy<2` and is incompatible with Pocket TTS, which requires `numpy>=2`.
+
+  ```bash
+  speech-to-speech --audio_enhancement
+  ```
+
+  <Warning>
+    `audio_enhancement` requires DeepFilterNet, which conflicts with Pocket TTS (`--tts pocket`). Do not combine both in the same environment.
+  </Warning>
+</ParamField>
+
+<ParamField path="enable_realtime_transcription" type="boolean" default="false">
+  When `true`, the VAD releases progressive audio chunks to the STT handler while the user is still speaking, enabling incremental transcription updates. Used internally by the live transcription feature; normally set via `--enable_live_transcription` on `ModuleArguments`.
+
+  ```bash
+  speech-to-speech --enable_realtime_transcription
+  ```
+</ParamField>
+
+<ParamField path="realtime_processing_pause" type="float" default="0.5">
+  Interval in seconds between progressive audio chunk releases during active speech when `enable_realtime_transcription` is on. Lower values produce more frequent partial transcription updates.
+
+  ```bash
+  speech-to-speech --enable_realtime_transcription --realtime_processing_pause 0.25
+  ```
+</ParamField>
+
+<ParamField path="speculative_reopen_ms" type="integer" default="1000">
+  In `realtime` mode, the number of milliseconds after a soft turn-end during which the turn stays reopenable. If the user starts speaking again within this window and no assistant output has been committed yet, the new speech continues the same turn instead of starting a new one.
+
+  ```bash
+  speech-to-speech --speculative_reopen_ms 1500
+  ```
+</ParamField>
+
+<ParamField path="unanswered_reopen_ms" type="integer" default="7000">
+  A sanity cap (in milliseconds) for how long a soft-ended speculative turn that has not yet received any assistant output remains reopenable. This bounds the unanswered case and is not a primary tuning knob; it has no effect when `speculative_reopen_ms` has already expired.
+
+  ```bash
+  speech-to-speech --unanswered_reopen_ms 5000
+  ```
+</ParamField>
+
+<ParamField path="short_segment_merge_ms" type="integer" default="0">
+  When greater than `0`, adjacent VAD segments that are each shorter than `min_speech_ms` are held and stitched together for up to this many milliseconds before being discarded. Fragments shorter than 100 ms of active speech are never held. Useful when `min_silence_ms` is very low (e.g. `32` ms) to reduce the risk of splitting a single utterance into many tiny fragments.
+
+  ```bash
+  speech-to-speech --min_silence_ms 32 --short_segment_merge_ms 300
+  ```
+</ParamField>
+
+## Tuning for sensitivity
+
+<CodeGroup>
+
+```bash High sensitivity (noisy room)
+# Lower thresh, larger pad, audio enhancement on
+speech-to-speech \
+    --thresh 0.4 \
+    --speech_pad_ms 700 \
+    --min_silence_ms 128 \
+    --audio_enhancement
+```
+
+```bash Low latency (quiet studio)
+# Higher thresh, tight silence window, no pad
+speech-to-speech \
+    --thresh 0.7 \
+    --min_silence_ms 48 \
+    --speech_pad_ms 200
+```
+
+```bash Barge-in optimised
+# Short silence window + continuation hysteresis
+speech-to-speech \
+    --min_silence_ms 48 \
+    --short_segment_merge_ms 250 \
+    --min_speech_ms 384 \
+    --min_speech_continuation_ms 192 \
+    --speculative_reopen_ms 1200
+```
+
+</CodeGroup>
+
+<Tip>
+  The recommended baseline for most use cases is `--thresh 0.6 --min_speech_ms 384 --min_speech_continuation_ms 192`, which is what the default `speech-to-speech` command uses.
+</Tip>

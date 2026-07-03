@@ -1,0 +1,159 @@
+---
+title: "WebSocket Mode: Bidirectional Audio Streaming"
+sidebarTitle: "WebSocket"
+description: "Stream raw PCM audio to and from the pipeline over a plain WebSocket connection for custom browser or native clients."
+---
+
+WebSocket mode exposes a plain `ws://` endpoint for bidirectional audio streaming. Unlike [Realtime mode](/modes/realtime), which implements the full OpenAI Realtime protocol with JSON event messages and base64-encoded PCM, WebSocket mode uses raw binary frames: the client sends raw PCM bytes to the server and receives raw PCM bytes back. This makes it the right choice when you are building a custom client — a browser app, a mobile app, or a device — and want full control over the audio framing without adopting the OpenAI event schema.
+
+## Starting the WebSocket Server
+
+```bash
+speech-to-speech --mode websocket --ws_host 0.0.0.0 --ws_port 8765
+```
+
+The server starts a `websockets` async server and logs:
+
+```
+WebSocket server starting on ws://0.0.0.0:8765
+WebSocket server ready, waiting for connections...
+```
+
+### Configuration Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--ws_host` | `0.0.0.0` | Host IP address the WebSocket server binds to |
+| `--ws_port` | `8765` | Port the WebSocket server listens on |
+
+## Audio Format
+
+Both directions carry the same raw PCM format:
+
+| Property | Value |
+|---|---|
+| Sample rate | 16,000 Hz |
+| Bit depth | 16-bit signed integer (`int16`) |
+| Channels | mono (1 channel) |
+| Frame encoding | Raw binary bytes (no base64, no JSON wrapper) |
+
+**Sending audio**: the client sends raw `int16` PCM bytes as binary WebSocket frames. The `WebSocketStreamer` accumulates incoming bytes into a per-client remainder buffer and chops them into aligned 512-sample (1,024-byte) chunks before placing them on the VAD input queue. Frames that straddle a 512-sample boundary are never dropped — the remainder carries over to the next frame.
+
+**Receiving audio**: the server buffers outbound TTS chunks until at least 100 ms of audio has accumulated (3,200 bytes at 16 kHz int16) before sending, reducing the number of WebSocket frames the client must handle.
+
+## Connecting a Client
+
+Any WebSocket library can connect. Example using the Python `websockets` package:
+
+```python
+import asyncio
+import sounddevice as sd
+import numpy as np
+import websockets
+
+SAMPLE_RATE = 16000
+CHUNK_SAMPLES = 512
+CHUNK_BYTES = CHUNK_SAMPLES * 2  # int16 → 2 bytes per sample
+
+async def stream_audio():
+    uri = "ws://localhost:8765"
+    async with websockets.connect(uri) as ws:
+
+        async def send_mic():
+            loop = asyncio.get_event_loop()
+            q: asyncio.Queue[bytes] = asyncio.Queue()
+
+            def callback(indata, frames, time, status):
+                loop.call_soon_threadsafe(q.put_nowait, bytes(indata))
+
+            with sd.RawInputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="int16",
+                blocksize=CHUNK_SAMPLES,
+                callback=callback,
+            ):
+                while True:
+                    chunk = await q.get()
+                    await ws.send(chunk)
+
+        async def recv_speaker():
+            async for message in ws:
+                if isinstance(message, bytes):
+                    audio = np.frombuffer(message, dtype=np.int16)
+                    sd.play(audio, samplerate=SAMPLE_RATE)
+
+        await asyncio.gather(send_mic(), recv_speaker())
+
+asyncio.run(stream_audio())
+```
+
+## Difference from Realtime Mode
+
+<Tabs>
+  <Tab title="WebSocket Mode">
+    - Plain binary WebSocket frames
+    - Raw int16 PCM bytes in both directions
+    - No JSON event envelope
+    - No session configuration protocol
+    - No built-in barge-in/cancellation signalling
+    - Suitable for custom clients that manage their own session logic
+  </Tab>
+  <Tab title="Realtime Mode">
+    - JSON event messages conforming to the OpenAI Realtime protocol
+    - Audio encoded as base64 inside `input_audio_buffer.append` / `response.output_audio.delta` events
+    - Full session config via `session.update` (instructions, tools, turn detection)
+    - Built-in barge-in handling and `response.cancel`
+    - Compatible with the OpenAI Python SDK and any OpenAI Realtime client library
+  </Tab>
+</Tabs>
+
+## Multiple Clients
+
+The server keeps a `set[ServerConnection]` of all connected clients. When audio is ready to send, it broadcasts to all connected clients with `asyncio.gather`. Incoming audio from any client is forwarded to the shared VAD input queue.
+
+When the last client disconnects, a `SESSION_END` control message is placed on the input queue to cleanly flush pipeline state.
+
+<Note>
+  The WebSocket server accepts any number of concurrent clients, but all clients share a single pipeline instance. If you need isolated conversation state per client, use [Realtime mode](/modes/realtime) with `--num_pipelines`.
+</Note>
+
+## LLM Backend Examples
+
+<Tabs>
+  <Tab title="Responses API">
+    ```bash
+    speech-to-speech \
+        --mode websocket \
+        --ws_host 0.0.0.0 \
+        --ws_port 8765 \
+        --stt parakeet-tdt \
+        --llm_backend responses-api \
+        --tts qwen3 \
+        --model_name gpt-4o-mini \
+        --responses_api_api_key "$OPENAI_API_KEY" \
+        --responses_api_stream
+    ```
+  </Tab>
+  <Tab title="MLX-LM (Apple Silicon)">
+    ```bash
+    speech-to-speech \
+        --mode websocket \
+        --ws_host 0.0.0.0 \
+        --ws_port 8765 \
+        --stt parakeet-tdt \
+        --llm_backend mlx-lm \
+        --tts qwen3 \
+        --model_name "mlx-community/Qwen3-4B-Instruct-2507-bf16" \
+        --enable_live_transcription
+    ```
+  </Tab>
+</Tabs>
+
+## Installing the WebSocket Extra
+
+WebSocket mode requires the `websockets` package. Install it with the bundled extra:
+
+```bash
+pip install "speech-to-speech[websocket]"
+```

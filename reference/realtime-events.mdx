@@ -1,0 +1,623 @@
+---
+title: "Realtime WebSocket Events Reference"
+sidebarTitle: "Events"
+description: "Full listing of supported client-to-server and server-to-client WebSocket events for the /v1/realtime endpoint, with payload fields and JSON examples."
+---
+
+The `/v1/realtime` WebSocket endpoint uses the OpenAI Realtime wire protocol. Every message is a JSON object with a `type` field that identifies the event. This page documents every client-to-server and server-to-client event the server currently supports, along with their payload fields and representative JSON examples.
+
+For a conceptual overview of how these events fit into the pipeline, see the [Realtime API reference](/reference/realtime-api).
+
+---
+
+## Client → Server events
+
+Clients send these events over the established WebSocket connection. Unknown `type` values produce an `error` event with code `unknown_or_invalid_event`.
+
+### `input_audio_buffer.append`
+
+Stream raw PCM audio to the server. The server decodes the base64 payload, resamples to the internal pipeline rate of 16 kHz, buffers any partial 512-sample chunk as a remainder, and puts complete chunks on the VAD's input queue.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"input_audio_buffer.append"` |
+| `audio` | `string` | Base64-encoded PCM16 audio bytes. The source sample rate is read from `session.audio.input.format.rate`; defaults to 16 kHz if not set. |
+
+```json
+{
+  "type": "input_audio_buffer.append",
+  "audio": "AAAAAAAAAAAA..."
+}
+```
+
+---
+
+### `session.update`
+
+Update the session configuration. The server performs a **deep-merge**: only explicitly-set fields are applied, so partial updates never overwrite unset fields. The updated config is immediately visible to the VAD, LLM, and TTS handlers for the next processing cycle.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"session.update"` |
+| `session.instructions` | `string` | System prompt injected at the start of every LLM context. |
+| `session.tools` | `array` | JSON Schema tool definitions (see [Tool calling](/reference/realtime-api#tool-calling)). |
+| `session.voice` | `string` | TTS voice identifier passed to the active TTS backend. |
+| `session.turn_detection.type` | `string` | Must be `"server_vad"`. |
+| `session.turn_detection.interrupt_response` | `boolean` | Whether new user speech cancels an in-progress response. Defaults to `true`. |
+| `session.audio` | `object` | Input and output audio format configuration. The server resamples internally to 16 kHz regardless of the chosen format. |
+
+```json
+{
+  "type": "session.update",
+  "session": {
+    "instructions": "You are a helpful assistant. Be concise.",
+    "voice": "af_heart",
+    "turn_detection": {
+      "type": "server_vad",
+      "interrupt_response": true
+    },
+    "tools": [
+      {
+        "type": "function",
+        "name": "get_time",
+        "description": "Return the current UTC time.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    ]
+  }
+}
+```
+
+<Note>
+  Only `realtime` session types are accepted. Sending a `RealtimeTranscriptionSessionCreateRequest` returns an `error` event with code `invalid_session_type`.
+</Note>
+
+---
+
+### `conversation.item.create`
+
+Inject an `input_text` message or a `function_call_output` into the LLM conversation context **without** triggering generation. A subsequent `response.create` is required to generate a reply.
+
+If a response is currently generating, the item is **deferred**: it is buffered and applied in arrival order once the active response completes. This prevents a `function_call_output` from arriving before its paired `function_call` is recorded in the chat history.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"conversation.item.create"` |
+| `item.type` | `string` | `"message"` for text, `"function_call_output"` for tool results. |
+| `item.role` | `string` | `"user"` or `"system"` for message items. |
+| `item.content` | `array` | For `message` items: array of `{ "type": "input_text", "text": "..." }` objects. |
+| `item.call_id` | `string` | For `function_call_output` items: the `call_id` from the matching `response.function_call_arguments.done` event. |
+| `item.output` | `string` | For `function_call_output` items: the serialised result of the tool execution. |
+
+<CodeGroup>
+```json Inject text
+{
+  "type": "conversation.item.create",
+  "item": {
+    "type": "message",
+    "role": "user",
+    "content": [
+      { "type": "input_text", "text": "What is the capital of France?" }
+    ]
+  }
+}
+```
+
+```json Inject tool result
+{
+  "type": "conversation.item.create",
+  "item": {
+    "type": "function_call_output",
+    "call_id": "call_abc123",
+    "output": "{\"temperature\": 22, \"condition\": \"sunny\"}"
+  }
+}
+```
+</CodeGroup>
+
+---
+
+### `response.create`
+
+Trigger LLM generation immediately. For the voice-activity-detection path, generation is triggered automatically after STT completes; this event is used for text-only inputs, tool-result follow-ups, or to override generation parameters per-response.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"response.create"` |
+| `response.instructions` | `string` | Per-response system prompt override. Merged with (or replaces) the session-level `instructions`. |
+| `response.tool_choice` | `string` | `"auto"`, `"required"`, or `"none"`. Only string values are currently supported. |
+| `response.input` | `array` | Additional conversation items to include for this response only (in-band). Leave empty to continue the default conversation. |
+
+```json
+{
+  "type": "response.create",
+  "response": {
+    "instructions": "Answer in exactly one sentence.",
+    "tool_choice": "auto"
+  }
+}
+```
+
+<Warning>
+  Sending `response.create` while another response is in progress returns an `error` event with code `conversation_already_has_active_response`. Cancel the active response first with `response.cancel`.
+</Warning>
+
+---
+
+### `response.cancel`
+
+Cancel the in-progress response and re-enable listening. The server stops LLM and TTS generation, flushes the output queues, and emits `response.done` with `status="cancelled"` and `reason="client_cancelled"`.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"response.cancel"` |
+
+```json
+{
+  "type": "response.cancel"
+}
+```
+
+---
+
+## Server → Client events
+
+The server sends these events over the WebSocket connection. Every event includes an `event_id` field with a unique identifier string.
+
+### `session.created`
+
+Sent immediately after the WebSocket connection is accepted, before any other event. Contains the full current session configuration.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"session.created"` |
+| `event_id` | `string` | Unique event identifier. |
+| `session` | `object` | Current `RealtimeSessionCreateRequest` — includes all fields from the active `RuntimeConfig`. |
+
+```json
+{
+  "type": "session.created",
+  "event_id": "event_abc123",
+  "session": {
+    "type": "realtime",
+    "instructions": null,
+    "voice": null,
+    "turn_detection": null,
+    "tools": []
+  }
+}
+```
+
+---
+
+### `error`
+
+Sent when a protocol or processing error occurs. The `error.type` field contains a machine-readable code.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"error"` |
+| `event_id` | `string` | Unique event identifier. |
+| `error.type` | `string` | Machine-readable error code (see table below). |
+| `error.message` | `string` | Human-readable description of the error. |
+
+| Error code | Trigger |
+|---|---|
+| `session_limit_reached` | All pipeline slots are occupied; new connection rejected. |
+| `unknown_or_invalid_event` | Client sent an event with an unrecognised or missing `type` field. |
+| `invalid_session_type` | `session.update` targeted a transcription session, which is not supported. |
+| `conversation_already_has_active_response` | `response.create` was sent while another response is still active. |
+| `response_failed` | Generation failed (e.g. invalid out-of-band input, provider rejected empty context). |
+
+```json
+{
+  "type": "error",
+  "event_id": "event_xyz789",
+  "error": {
+    "type": "conversation_already_has_active_response",
+    "message": "Cannot create response while another response is in progress."
+  }
+}
+```
+
+---
+
+### `input_audio_buffer.speech_started`
+
+Emitted by the VAD when user speech is detected. Carries the timestamp (in milliseconds from the start of the current audio buffer) at which speech began.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"input_audio_buffer.speech_started"` |
+| `event_id` | `string` | Unique event identifier. |
+| `audio_start_ms` | `integer` | Millisecond offset within the audio buffer where speech was detected. |
+| `item_id` | `string` | ID of the input audio conversation item being recorded. |
+
+```json
+{
+  "type": "input_audio_buffer.speech_started",
+  "event_id": "event_001",
+  "audio_start_ms": 320,
+  "item_id": "item_aaa111"
+}
+```
+
+---
+
+### `input_audio_buffer.speech_stopped`
+
+Emitted by the VAD when the end of a speech segment is detected. After this event, the full utterance audio is forwarded to STT.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"input_audio_buffer.speech_stopped"` |
+| `event_id` | `string` | Unique event identifier. |
+| `audio_end_ms` | `integer` | Millisecond offset within the audio buffer where speech ended. |
+| `item_id` | `string` | ID of the input audio conversation item. |
+
+```json
+{
+  "type": "input_audio_buffer.speech_stopped",
+  "event_id": "event_002",
+  "audio_end_ms": 2140,
+  "item_id": "item_aaa111"
+}
+```
+
+---
+
+### `conversation.item.created`
+
+Acknowledgement for a successful `conversation.item.create` request. Also emitted when a deferred item (buffered during an active response) is applied after the response completes.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"conversation.item.created"` |
+| `event_id` | `string` | Unique event identifier. |
+| `previous_item_id` | `string \| null` | ID of the item that immediately precedes this one in the conversation. |
+| `item` | `object` | The `ConversationItem` that was injected. |
+
+```json
+{
+  "type": "conversation.item.created",
+  "event_id": "event_003",
+  "previous_item_id": "item_aaa111",
+  "item": {
+    "id": "item_bbb222",
+    "type": "message",
+    "role": "user",
+    "content": [{ "type": "input_text", "text": "What time is it?" }]
+  }
+}
+```
+
+---
+
+### `conversation.item.input_audio_transcription.delta`
+
+Streaming partial transcript emitted by `TranscriptionNotifier` as STT tokens arrive. Only sent when `--enable_live_transcription` is active.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"conversation.item.input_audio_transcription.delta"` |
+| `event_id` | `string` | Unique event identifier. |
+| `item_id` | `string` | ID of the in-progress input audio item. |
+| `content_index` | `integer` | Index within the item's content array. |
+| `delta` | `string` | Incremental transcript text. |
+
+```json
+{
+  "type": "conversation.item.input_audio_transcription.delta",
+  "event_id": "event_004",
+  "item_id": "item_aaa111",
+  "content_index": 0,
+  "delta": "What time"
+}
+```
+
+---
+
+### `conversation.item.input_audio_transcription.completed`
+
+Final transcript for the user turn, emitted once STT has finished processing the full utterance. The `transcript` field is what the LLM receives as the user message.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"conversation.item.input_audio_transcription.completed"` |
+| `event_id` | `string` | Unique event identifier. |
+| `item_id` | `string` | ID of the input audio conversation item. |
+| `content_index` | `integer` | Index within the item's content array. |
+| `transcript` | `string` | Full recognised transcript text. |
+| `usage.type` | `string` | `"duration"` — indicates the usage metric is measured in seconds. |
+| `usage.seconds` | `number` | Duration of the audio segment in seconds. |
+
+```json
+{
+  "type": "conversation.item.input_audio_transcription.completed",
+  "event_id": "event_005",
+  "item_id": "item_aaa111",
+  "content_index": 0,
+  "transcript": "What time is it right now?",
+  "usage": {
+    "type": "duration",
+    "seconds": 2.14
+  }
+}
+```
+
+---
+
+### `response.created`
+
+Emitted when the server begins generating a response. For the explicit `response.create` path this is sent immediately; for the VAD → STT → LLM path it is sent on the first outbound audio chunk.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"response.created"` |
+| `event_id` | `string` | Unique event identifier. |
+| `response.id` | `string` | Unique response identifier, referenced by all subsequent response events. |
+| `response.status` | `string` | `"in_progress"` |
+| `response.conversation_id` | `string \| null` | Conversation ID, or `null` for out-of-band responses. |
+| `response.usage` | `object` | Token counters (zero at creation time; final values appear in `response.done`). |
+
+```json
+{
+  "type": "response.created",
+  "event_id": "event_006",
+  "response": {
+    "id": "resp_abc123",
+    "object": "realtime.response",
+    "status": "in_progress",
+    "conversation_id": "conv_xyz",
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0
+    }
+  }
+}
+```
+
+---
+
+### `response.output_audio.delta`
+
+One chunk of base64-encoded PCM audio from TTS. Audio chunks are batched by the `_send_loop` (up to 6400 bytes per message) to reduce WebSocket frame overhead.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"response.output_audio.delta"` |
+| `event_id` | `string` | Unique event identifier. |
+| `response_id` | `string` | ID of the enclosing response. |
+| `item_id` | `string` | ID of the output audio item. |
+| `output_index` | `integer` | Index of the output item within the response. |
+| `content_index` | `integer` | Content part index within the output item. |
+| `delta` | `string` | Base64-encoded PCM16 audio. Output sample rate reflects `session.audio.output.format.rate` (default 16 kHz). |
+
+```json
+{
+  "type": "response.output_audio.delta",
+  "event_id": "event_007",
+  "response_id": "resp_abc123",
+  "item_id": "item_out001",
+  "output_index": 0,
+  "content_index": 0,
+  "delta": "AAAAAAAAAAAA..."
+}
+```
+
+---
+
+### `response.output_audio.done`
+
+Audio stream complete for the current output item. Sent after the final `response.output_audio.delta` chunk, and also on cancellation (with no preceding delta events for that item).
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"response.output_audio.done"` |
+| `event_id` | `string` | Unique event identifier. |
+| `response_id` | `string` | ID of the enclosing response. |
+| `item_id` | `string` | ID of the output audio item. |
+| `output_index` | `integer` | Index of the output item within the response. |
+| `content_index` | `integer` | Content part index. |
+
+```json
+{
+  "type": "response.output_audio.done",
+  "event_id": "event_008",
+  "response_id": "resp_abc123",
+  "item_id": "item_out001",
+  "output_index": 0,
+  "content_index": 0
+}
+```
+
+---
+
+### `response.output_audio_transcript.done`
+
+Full assistant text transcript for the turn. Emitted once, after `response.output_audio.done`, carrying the complete LLM output text that was synthesised into audio.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"response.output_audio_transcript.done"` |
+| `event_id` | `string` | Unique event identifier. |
+| `response_id` | `string` | ID of the enclosing response. |
+| `item_id` | `string` | ID of the output audio item. |
+| `output_index` | `integer` | Index of the output item within the response. |
+| `content_index` | `integer` | Content part index. |
+| `transcript` | `string` | Full assistant response text. |
+
+```json
+{
+  "type": "response.output_audio_transcript.done",
+  "event_id": "event_009",
+  "response_id": "resp_abc123",
+  "item_id": "item_out001",
+  "output_index": 0,
+  "content_index": 0,
+  "transcript": "It is currently 3:42 PM UTC."
+}
+```
+
+---
+
+### `response.function_call_arguments.done`
+
+Emitted for each tool call produced during generation. The client should execute the named function with the provided arguments, then send a `conversation.item.create` with `type: "function_call_output"` to return the result.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"response.function_call_arguments.done"` |
+| `event_id` | `string` | Unique event identifier. |
+| `response_id` | `string` | ID of the enclosing response. |
+| `item_id` | `string` | ID of the output item. |
+| `output_index` | `integer` | Index of this output item within the response. |
+| `call_id` | `string` | Unique identifier for this tool invocation. Pass this back in `conversation.item.create` as `call_id`. |
+| `name` | `string` | Name of the function to call. |
+| `arguments` | `string` | JSON-encoded arguments object matching the tool's parameter schema. |
+
+```json
+{
+  "type": "response.function_call_arguments.done",
+  "event_id": "event_010",
+  "response_id": "resp_abc123",
+  "item_id": "item_out002",
+  "output_index": 1,
+  "call_id": "call_xyz456",
+  "name": "get_weather",
+  "arguments": "{\"city\": \"Paris\"}"
+}
+```
+
+---
+
+### `response.done`
+
+Response lifecycle complete. Sent after `response.output_audio.done` (for audio responses) or `response.output_text.done` (for text-only responses). Always emitted, even for cancelled or failed responses.
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | `string` | `"response.done"` |
+| `event_id` | `string` | Unique event identifier. |
+| `response.id` | `string` | ID of the completed response. |
+| `response.status` | `string` | `"completed"`, `"cancelled"`, or `"failed"`. |
+| `response.status_details.type` | `string` | Mirrors `response.status`. |
+| `response.status_details.reason` | `string \| null` | `"turn_detected"` (barge-in), `"client_cancelled"` (`response.cancel`), or `null` for `"completed"`. |
+| `response.usage` | `object` | Final `input_tokens`, `output_tokens`, and `total_tokens` for this response. |
+
+<Tabs>
+  <Tab title="Completed">
+    ```json
+    {
+      "type": "response.done",
+      "event_id": "event_011",
+      "response": {
+        "id": "resp_abc123",
+        "object": "realtime.response",
+        "status": "completed",
+        "status_details": { "type": "completed", "reason": null },
+        "usage": {
+          "input_tokens": 42,
+          "output_tokens": 18,
+          "total_tokens": 60
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Cancelled (barge-in)">
+    ```json
+    {
+      "type": "response.done",
+      "event_id": "event_012",
+      "response": {
+        "id": "resp_abc123",
+        "object": "realtime.response",
+        "status": "cancelled",
+        "status_details": { "type": "cancelled", "reason": "turn_detected" },
+        "usage": {
+          "input_tokens": 42,
+          "output_tokens": 5,
+          "total_tokens": 47
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Cancelled (client)">
+    ```json
+    {
+      "type": "response.done",
+      "event_id": "event_013",
+      "response": {
+        "id": "resp_abc123",
+        "object": "realtime.response",
+        "status": "cancelled",
+        "status_details": { "type": "cancelled", "reason": "client_cancelled" },
+        "usage": {
+          "input_tokens": 42,
+          "output_tokens": 9,
+          "total_tokens": 51
+        }
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Tool result flow
+
+The sequence below illustrates the full round-trip for a single tool call, from the server's `response.function_call_arguments.done` to a follow-up spoken response.
+
+<Steps>
+  <Step title="Server emits tool call">
+    The server sends `response.function_call_arguments.done` with `call_id`, `name`, and `arguments`. The response may or may not include audio alongside the tool call, depending on whether the LLM generated a lead-in phrase.
+  </Step>
+  <Step title="Server closes the response">
+    `response.output_audio.done` (if audio was generated) and `response.done` are sent with `status="completed"`.
+  </Step>
+  <Step title="Client executes the tool">
+    The client calls the function locally and serialises the result as a JSON string.
+  </Step>
+  <Step title="Client submits the result">
+    The client sends `conversation.item.create` with `type: "function_call_output"`, `call_id` matching the one from step 1, and `output` containing the result string.
+  </Step>
+  <Step title="Server acknowledges">
+    The server appends the tool output to the conversation context and sends `conversation.item.created`. **Generation is not triggered yet.**
+  </Step>
+  <Step title="Client triggers follow-up (optional)">
+    If the result should be spoken aloud (e.g. a search result), the client sends `response.create`. The LLM generates a reply that incorporates the tool output, and the TTS speaks it.
+
+    For fire-and-forget actions (e.g. a robot movement command), the client can stop after `conversation.item.created` — the assistant has already spoken its lead-in phrase before the tool call.
+  </Step>
+</Steps>
+
+---
+
+## Event ordering summary
+
+The table below shows the typical sequence of events for a complete VAD-triggered voice turn with one tool call.
+
+| # | Direction | Event |
+|---|---|---|
+| 1 | Server → Client | `input_audio_buffer.speech_started` |
+| 2 | Server → Client | `conversation.item.input_audio_transcription.delta` *(repeated)* |
+| 3 | Server → Client | `input_audio_buffer.speech_stopped` |
+| 4 | Server → Client | `conversation.item.input_audio_transcription.completed` |
+| 5 | Server → Client | `response.created` |
+| 6 | Server → Client | `response.output_audio.delta` *(repeated)* |
+| 7 | Server → Client | `response.function_call_arguments.done` |
+| 8 | Server → Client | `response.output_audio.done` |
+| 9 | Server → Client | `response.output_audio_transcript.done` |
+| 10 | Server → Client | `response.done` |
+| 11 | Client → Server | `conversation.item.create` *(function_call_output)* |
+| 12 | Server → Client | `conversation.item.created` |
+| 13 | Client → Server | `response.create` *(optional follow-up)* |
+| 14 | Server → Client | `response.created`, audio deltas, `response.done` |

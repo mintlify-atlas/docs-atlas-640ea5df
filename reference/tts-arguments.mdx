@@ -1,0 +1,375 @@
+---
+title: "TTS Handler Arguments: Text-to-Speech Config"
+sidebarTitle: "TTS Args"
+description: "All TTS configuration flags for every backend: Qwen3-TTS, Kokoro-82M, Pocket TTS, ChatTTS, and Facebook MMS."
+---
+
+The TTS stage converts text tokens from the LLM into audio streamed back to the client. Five backends are available, selected via `--tts <value>` on [ModuleArguments](/reference/module-arguments). Each backend uses its own flag prefix so all argument classes can coexist in the same namespace.
+
+```bash
+# Qwen3-TTS (default)
+speech-to-speech --tts qwen3 --qwen3_tts_speaker Aiden
+
+# Kokoro
+speech-to-speech --tts kokoro --kokoro_voice bm_fable
+
+# Pocket TTS
+speech-to-speech --tts pocket --pocket_tts_voice jean
+
+# ChatTTS
+speech-to-speech --tts chatTTS --chat_tts_device cuda
+
+# Facebook MMS
+speech-to-speech --tts facebookMMS --tts_language en
+```
+
+<Tabs>
+  <Tab title="Qwen3-TTS">
+
+    Prefix: `--qwen3_tts_`  
+    Backend value: `--tts qwen3` (default)
+
+    Qwen3-TTS is the default TTS backend. On non-macOS platforms it uses the `faster-qwen3-tts` GGML backend by default. On Apple Silicon it automatically selects `mlx-audio` with a 6-bit quantized MLX variant.
+
+    <ParamField path="qwen3_tts_model_name" type="string" default="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice">
+      Hugging Face Hub ID or local path for the Qwen3-TTS model. On Apple Silicon, `Qwen/*` model IDs are automatically mapped to the corresponding `mlx-community/*` model (defaulting to the 6-bit MLX variant).
+
+      ```bash
+      speech-to-speech --tts qwen3 \
+          --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_device" type="string" default="cuda">
+      Preferred device. Options: `cuda`, `cpu`, `mps`, `auto`. On Apple Silicon the MLX audio backend is selected automatically regardless of this flag.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_device cuda
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_dtype" type="string" default="auto">
+      Data type for inference. Options: `auto`, `float16`, `bfloat16`, `float32`.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_dtype float16
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_attn_implementation" type="string" default="eager">
+      Attention implementation. Options: `eager`, `flash_attention_2`, `sdpa`. Use `eager` on Jetson devices.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_attn_implementation sdpa
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_backend" type="'ggml' | 'torch'" default="ggml">
+      `faster-qwen3-tts` backend on non-macOS platforms. `ggml` uses the GGML path from `qwentts-cpp-python`; `torch` uses the CUDA-graphs implementation. On Apple Silicon this flag is ignored and `mlx-audio` is used.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_backend torch
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_speaker" type="string" default="Aiden">
+      Speaker name for CustomVoice model variants. If not provided, the first supported speaker is used. Only applies to `CustomVoice` model checkpoints.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_speaker Aiden
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_language" type="string" default="auto">
+      Target synthesis language. `auto` lets the model determine the language from text content.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_language en
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_non_streaming_mode" type="boolean" default="true">
+      When `true`, pre-fills the full target text before decode on `faster-qwen3-tts`. Currently ignored on Apple Silicon because `mlx-audio` does not expose this option yet.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_non_streaming_mode True
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_mlx_quantization" type="string" default="6bit">
+      MLX quantization level on Apple Silicon. Options: `bf16`, `4bit`, `6bit`, `8bit`. Only used when `mlx-audio` is selected automatically on macOS.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_mlx_quantization 4bit
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_ref_audio" type="string">
+      Path to a reference audio file for voice cloning. Leave unset when using a CustomVoice model.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_ref_audio /path/to/ref.wav
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_ref_text" type="string" default="I'm confused why some people have super short timelines, yet at the same time are bullish on scaling up reinforcement learning atop LLMs...">
+      Transcription of the reference audio file used for voice cloning. Required when `--qwen3_tts_ref_audio` is set.
+
+      ```bash
+      speech-to-speech --tts qwen3 \
+          --qwen3_tts_ref_audio ref.wav \
+          --qwen3_tts_ref_text "Hello, this is my reference voice."
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_instruct" type="string">
+      Instruction text for VoiceDesign model variants. Required when using a VoiceDesign checkpoint.
+
+      ```bash
+      speech-to-speech --tts qwen3 \
+          --qwen3_tts_instruct "Speak in a calm, professional tone."
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_xvec_only" type="boolean" default="false">
+      Use x-vector only voice cloning mode. Recommended for cleaner utterance starts and language switching scenarios.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_xvec_only
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_parity_mode" type="boolean" default="false">
+      Disable the CUDA-graph streaming path and fall back to parity mode for improved stability on hardware where CUDA graphs cause issues.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_parity_mode
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_streaming_chunk_size" type="integer">
+      Codec steps per streaming chunk. When unset the handler uses a backend-specific default: `8` on `faster-qwen3-tts` and `4` on `mlx-audio`. Smaller values reduce first-audio latency; larger values reduce overhead.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_streaming_chunk_size 4
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_max_new_tokens" type="integer" default="1536">
+      Upper cap for codec tokens generated per utterance. The handler estimates a per-utterance budget from the text and clamps it to this ceiling (approximately 12 tokens per second of audio). Raise above `1536` for longer utterances.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_max_new_tokens 2048
+      ```
+    </ParamField>
+
+    <ParamField path="qwen3_tts_blocksize" type="integer" default="512">
+      Audio chunk size in samples for streaming output. Must match the `LocalAudioStreamer` blocksize.
+
+      ```bash
+      speech-to-speech --tts qwen3 --qwen3_tts_blocksize 512
+      ```
+    </ParamField>
+
+  </Tab>
+  <Tab title="Kokoro">
+
+    Prefix: `--kokoro_`  
+    Backend value: `--tts kokoro`
+
+    Kokoro-82M is a fast, high-quality TTS model optimized for Apple Silicon. Install with `pip install "speech-to-speech[kokoro]"`. On MPS it auto-selects `mlx-community/Kokoro-82M-bf16`; on CUDA/CPU it uses `hexgrad/Kokoro-82M`.
+
+    <ParamField path="kokoro_model_name" type="string">
+      Kokoro model to load. When unset, auto-selected based on device: `mlx-community/Kokoro-82M-bf16` for MPS, `hexgrad/Kokoro-82M` for CUDA/CPU.
+
+      ```bash
+      speech-to-speech --tts kokoro --kokoro_model_name hexgrad/Kokoro-82M
+      ```
+    </ParamField>
+
+    <ParamField path="kokoro_device" type="string" default="auto">
+      Device to run Kokoro on. Options: `auto`, `cuda`, `cpu`, `mps`. `auto` selects MPS on Mac and CUDA on GPU systems.
+
+      ```bash
+      speech-to-speech --tts kokoro --kokoro_device mps
+      ```
+    </ParamField>
+
+    <ParamField path="kokoro_voice" type="string" default="bm_fable">
+      Voice preset to use for synthesis. See the `VOICES.md` file in the Kokoro repository for a full list of available voices.
+
+      ```bash
+      speech-to-speech --tts kokoro --kokoro_voice af_sky
+      ```
+    </ParamField>
+
+    <ParamField path="kokoro_lang_code" type="string" default="b">
+      Language code prefix. `a` for American English, `b` for British English, `j` for Japanese, and other codes as documented in the Kokoro model card.
+
+      ```bash
+      speech-to-speech --tts kokoro --kokoro_lang_code a --kokoro_voice af_sky
+      ```
+    </ParamField>
+
+    <ParamField path="kokoro_speed" type="float" default="1.0">
+      Speech speed multiplier. Values above `1.0` speed up delivery; values below `1.0` slow it down.
+
+      ```bash
+      speech-to-speech --tts kokoro --kokoro_speed 1.15
+      ```
+    </ParamField>
+
+    <ParamField path="kokoro_blocksize" type="integer" default="512">
+      Audio chunk size in samples for streaming output.
+
+      ```bash
+      speech-to-speech --tts kokoro --kokoro_blocksize 512
+      ```
+    </ParamField>
+
+  </Tab>
+  <Tab title="Pocket TTS">
+
+    Prefix: `--pocket_tts_`  
+    Backend value: `--tts pocket`
+
+    Pocket TTS from Kyutai Labs provides streaming TTS with voice cloning. Requires `numpy>=2` and is incompatible with DeepFilterNet audio enhancement. Install with `pip install "speech-to-speech[pocket]"`.
+
+    Available built-in voice presets: `alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`.
+
+    <ParamField path="pocket_tts_device" type="string" default="cpu">
+      Device to run the Pocket TTS model on. Options: `cpu`, `cuda`, `mps`.
+
+      ```bash
+      speech-to-speech --tts pocket --pocket_tts_device cuda
+      ```
+    </ParamField>
+
+    <ParamField path="pocket_tts_voice" type="string" default="jean">
+      Voice to use for synthesis. Can be:
+      - A built-in preset name (`alba`, `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`)
+      - A local audio file path for voice cloning
+      - A Hugging Face path such as `hf://kyutai/tts-voices/...`
+
+      ```bash
+      speech-to-speech --tts pocket --pocket_tts_voice fantine
+      ```
+    </ParamField>
+
+    <ParamField path="pocket_tts_sample_rate" type="integer" default="16000">
+      Output sample rate in Hz. Pocket TTS synthesizes at 24 kHz internally and resamples to this rate to match the pipeline's audio streamer.
+
+      ```bash
+      speech-to-speech --tts pocket --pocket_tts_sample_rate 16000
+      ```
+    </ParamField>
+
+    <ParamField path="pocket_tts_blocksize" type="integer" default="512">
+      Size of audio blocks yielded per streaming iteration.
+
+      ```bash
+      speech-to-speech --tts pocket --pocket_tts_blocksize 512
+      ```
+    </ParamField>
+
+    <ParamField path="pocket_tts_max_tokens" type="integer" default="50">
+      Maximum number of tokens to generate per sentence in streaming mode.
+
+      ```bash
+      speech-to-speech --tts pocket --pocket_tts_max_tokens 80
+      ```
+    </ParamField>
+
+    <Warning>
+      Pocket TTS requires `numpy>=2` and conflicts with DeepFilterNet audio enhancement (`--audio_enhancement`). Do not combine both in the same environment.
+    </Warning>
+
+  </Tab>
+  <Tab title="ChatTTS">
+
+    Prefix: `--chat_tts_`  
+    Backend value: `--tts chatTTS`
+
+    ChatTTS provides streaming Chinese and English synthesis.
+
+    <ParamField path="chat_tts_stream" type="boolean" default="true">
+      Whether to use ChatTTS in streaming mode. Keep `true` for low-latency voice pipelines.
+
+      ```bash
+      speech-to-speech --tts chatTTS --chat_tts_stream
+      ```
+    </ParamField>
+
+    <ParamField path="chat_tts_device" type="string" default="cuda">
+      Device to run ChatTTS on.
+
+      ```bash
+      speech-to-speech --tts chatTTS --chat_tts_device cpu
+      ```
+    </ParamField>
+
+    <ParamField path="chat_tts_chunk_size" type="integer" default="512">
+      Audio data chunk size processed per cycle, in samples. Smaller values reduce playback latency; larger values reduce CPU overhead.
+
+      ```bash
+      speech-to-speech --tts chatTTS --chat_tts_chunk_size 256
+      ```
+    </ParamField>
+
+  </Tab>
+  <Tab title="Facebook MMS">
+
+    Prefix: `--facebook_mms_` (model/device/dtype) and `--tts_` (language)  
+    Backend value: `--tts facebookMMS`
+
+    Facebook MMS (Massively Multilingual Speech) provides broad language coverage across hundreds of languages.
+
+    <ParamField path="facebook_mms_model_name" type="string" default="facebook/mms-tts-eng">
+      Hugging Face Hub model ID for the MMS TTS checkpoint. Change the language suffix to select a different language (e.g. `facebook/mms-tts-fra` for French).
+
+      ```bash
+      speech-to-speech --tts facebookMMS \
+          --facebook_mms_model_name facebook/mms-tts-fra
+      ```
+    </ParamField>
+
+    <ParamField path="tts_language" type="string" default="en">
+      ISO 639-3 language code that is forwarded to the model. Ensure this matches the language of the loaded checkpoint.
+
+      ```bash
+      speech-to-speech --tts facebookMMS --tts_language fra \
+          --facebook_mms_model_name facebook/mms-tts-fra
+      ```
+    </ParamField>
+
+    <ParamField path="facebook_mms_device" type="string" default="cuda">
+      Device to run the MMS model on.
+
+      ```bash
+      speech-to-speech --tts facebookMMS --facebook_mms_device cpu
+      ```
+    </ParamField>
+
+    <ParamField path="facebook_mms_torch_dtype" type="string" default="float32">
+      PyTorch data type for the MMS model. MMS is a smaller model and runs well in `float32`.
+
+      ```bash
+      speech-to-speech --tts facebookMMS --facebook_mms_torch_dtype float16
+      ```
+    </ParamField>
+
+  </Tab>
+</Tabs>
+
+## Comparing TTS backends on Apple Silicon
+
+```bash
+python scripts/benchmark_tts.py \
+    --handlers qwen3 \
+    --iterations 3 \
+    --qwen3_mlx_quantizations bf16 4bit 6bit 8bit
+```
+
+<Tip>
+  On Apple Silicon, Qwen3-TTS with `--qwen3_tts_mlx_quantization 6bit` typically delivers the best balance of quality and latency. Kokoro and Pocket TTS are also solid alternatives for different voice styles.
+</Tip>

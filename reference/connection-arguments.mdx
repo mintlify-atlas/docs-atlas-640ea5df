@@ -1,0 +1,165 @@
+---
+title: "Connection Arguments: Network and Audio Config"
+sidebarTitle: "Connection Args"
+description: "Socket and WebSocket connection configuration flags for server/client mode, WebSocket streaming mode, and the realtime OpenAI-compatible server."
+---
+
+When the pipeline runs in `socket`, `websocket`, or `realtime` mode it listens on network interfaces for audio data. Three argument classes control these networking concerns: `SocketReceiverArguments` and `SocketSenderArguments` for TCP socket mode, and `WebSocketStreamerArguments` for WebSocket and realtime modes.
+
+These flags have no shared prefix — pass them directly, for example `--recv_host 0.0.0.0` or `--ws_port 8765`.
+
+## SocketReceiverArguments
+
+Used with `--mode socket`. The receiver opens a TCP socket on the server and accepts raw audio from a remote client.
+
+<ParamField path="recv_host" type="string" default="localhost">
+  Host address the receiver socket binds to. Use `0.0.0.0` to accept connections from any network interface (required when the pipeline is on a remote server). Use `localhost` (default) for local testing where the client and server are on the same machine.
+
+  ```bash
+  # Accept connections from any host
+  speech-to-speech --mode socket --recv_host 0.0.0.0
+
+  # Loopback only (local test)
+  speech-to-speech --mode socket --recv_host localhost
+  ```
+</ParamField>
+
+<ParamField path="recv_port" type="integer" default="12345">
+  TCP port number the receiver listens on. Ensure this port is open in any firewall rules when accepting remote connections.
+
+  ```bash
+  speech-to-speech --mode socket --recv_host 0.0.0.0 --recv_port 12345
+  ```
+</ParamField>
+
+<ParamField path="chunk_size" type="integer" default="1024">
+  Size of each audio data chunk read from the socket per receive call, in bytes. Larger chunks reduce syscall overhead; smaller chunks reduce buffering latency.
+
+  ```bash
+  speech-to-speech --mode socket --chunk_size 2048
+  ```
+</ParamField>
+
+## SocketSenderArguments
+
+Used with `--mode socket`. The sender opens a TCP connection to the client and streams synthesized audio back.
+
+<ParamField path="send_host" type="string" default="localhost">
+  Host address of the client that will receive the synthesized audio. Set to the IP address of the client machine when the pipeline runs on a remote server.
+
+  ```bash
+  speech-to-speech --mode socket \
+      --recv_host 0.0.0.0 \
+      --send_host 0.0.0.0
+  ```
+</ParamField>
+
+<ParamField path="send_port" type="integer" default="12346">
+  TCP port number on the client that the sender connects to for returning synthesized audio.
+
+  ```bash
+  speech-to-speech --mode socket --send_port 12346
+  ```
+</ParamField>
+
+## WebSocketStreamerArguments
+
+Used with `--mode websocket` and `--mode realtime`. The WebSocket streamer opens a bidirectional WebSocket server for audio input and output.
+
+<ParamField path="ws_host" type="string" default="0.0.0.0">
+  Host address the WebSocket server binds to. The default `0.0.0.0` accepts connections on all network interfaces. Change to a specific IP to restrict access.
+
+  ```bash
+  speech-to-speech --mode websocket --ws_host 0.0.0.0
+  ```
+</ParamField>
+
+<ParamField path="ws_port" type="integer" default="8765">
+  Port number the WebSocket server listens on. In `realtime` mode this port also serves the OpenAI Realtime-compatible endpoint at `/v1/realtime`.
+
+  ```bash
+  speech-to-speech --mode websocket --ws_port 8765
+  ```
+</ParamField>
+
+## Usage examples
+
+<CodeGroup>
+
+```bash Server/Client — server side
+# Server: bind receiver and sender to all interfaces
+speech-to-speech \
+    --mode socket \
+    --recv_host 0.0.0.0 \
+    --send_host 0.0.0.0 \
+    --recv_port 12345 \
+    --send_port 12346
+```
+
+```bash Server/Client — client side
+# Client: stream microphone to server, play received audio
+python scripts/listen_and_play.py --host <SERVER_IP>
+```
+
+```bash WebSocket server
+speech-to-speech \
+    --mode websocket \
+    --ws_host 0.0.0.0 \
+    --ws_port 8765
+```
+
+```bash Realtime server (OpenAI Realtime protocol)
+speech-to-speech \
+    --mode realtime \
+    --ws_host 0.0.0.0 \
+    --ws_port 8765 \
+    --num_pipelines 2
+```
+
+</CodeGroup>
+
+### Connecting to the WebSocket server
+
+In `websocket` mode the server accepts raw PCM audio bytes (16 kHz, int16, mono) and returns synthesized audio bytes over the same connection:
+
+```python
+import asyncio
+import websockets
+
+async def stream_audio():
+    uri = "ws://localhost:8765"
+    async with websockets.connect(uri) as ws:
+        # Send raw PCM audio bytes
+        with open("input.pcm", "rb") as f:
+            await ws.send(f.read())
+        # Receive synthesized audio
+        response = await ws.recv()
+        with open("output.pcm", "wb") as f:
+            f.write(response)
+
+asyncio.run(stream_audio())
+```
+
+### Connecting in realtime mode
+
+In `realtime` mode the server speaks the OpenAI Realtime protocol. Use the OpenAI Python client:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8765/v1", api_key="not-needed")
+
+with client.beta.realtime.connect(model="model_name") as conn:
+    conn.session.update(
+        session={
+            "instructions": "You are a helpful assistant.",
+            "turn_detection": {"type": "server_vad", "interrupt_response": True},
+        }
+    )
+    for event in conn:
+        print(event.type)
+```
+
+<Note>
+  The `realtime` mode WebSocket endpoint is at `/v1/realtime` on `ws_port`. The `websocket` mode serves at the root path `/`. Both share the same `--ws_host` and `--ws_port` flags.
+</Note>

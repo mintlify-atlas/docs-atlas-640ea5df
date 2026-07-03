@@ -1,0 +1,110 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "Speech to Speech",
+  "projectDescription": "A modular, low-latency cascaded pipeline for building local voice agents using open-source VAD, STT, LLM, and TTS models.",
+  "theme": "palm",
+  "primaryColor": "#f8c61e",
+  "lightColor": "#fbf9ec",
+  "darkColor": "#4e412f",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Pipeline Modes",
+            "pages": [
+              "modes/realtime",
+              "modes/local",
+              "modes/server-client",
+              "modes/websocket",
+              "modes/docker"
+            ]
+          },
+          {
+            "group": "Pipeline Components",
+            "pages": [
+              "components/vad",
+              "components/stt",
+              "components/llm",
+              "components/tts"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/apple-silicon",
+              "guides/multi-language",
+              "guides/tool-calling",
+              "guides/benchmarking"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "CLI Reference",
+            "pages": [
+              "reference/cli-overview",
+              "reference/module-arguments",
+              "reference/vad-arguments",
+              "reference/stt-arguments",
+              "reference/llm-arguments",
+              "reference/tts-arguments",
+              "reference/connection-arguments"
+            ]
+          },
+          {
+            "group": "Realtime API",
+            "pages": [
+              "reference/realtime-api",
+              "reference/realtime-events"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Cascaded VAD → STT → LLM → TTS pipeline with sub-100ms latency",
+    "OpenAI Realtime-compatible WebSocket server at /v1/realtime",
+    "Modular component selection: swap STT, LLM, and TTS backends via CLI flags",
+    "Multiple run modes: realtime, local, socket, and websocket",
+    "Multi-language support with automatic language detection",
+    "Tool/function calling for local and OpenAI-compatible LLM backends",
+    "Barge-in (interruption) detection via CancelScope mechanism",
+    "Apple Silicon optimizations using MLX for all pipeline components",
+    "Docker support for GPU-accelerated server deployment",
+    "Live transcription streaming during user speech"
+  ],
+  "publicApiSurface": [
+    "speech-to-speech (CLI entrypoint)",
+    "--mode: realtime | local | socket | websocket",
+    "--stt: whisper | whisper-mlx | mlx-audio-whisper | faster-whisper | parakeet-tdt | paraformer",
+    "--llm_backend: transformers | mlx-lm | responses-api | chat-completions",
+    "--tts: chatTTS | facebookMMS | pocket | kokoro | qwen3",
+    "--local_mac_optimal_settings (Apple Silicon shortcut)",
+    "--num_pipelines (concurrent realtime session pool)",
+    "--enable_live_transcription",
+    "--language (ISO code or 'auto')",
+    "WebSocket /v1/realtime (OpenAI Realtime protocol)",
+    "input_audio_buffer.append event",
+    "session.update event",
+    "conversation.item.create event",
+    "response.create event",
+    "response.cancel event",
+    "VADHandlerArguments (thresh, min_silence_ms, min_speech_ms, etc.)",
+    "ResponsesApiLanguageModelHandlerArguments (model_name, base_url, api_key, stream)",
+    "BaseHandler (base class for custom pipeline components)"
+  ]
+}

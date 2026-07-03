@@ -1,47 +1,158 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Speech to Speech"
+sidebarTitle: "Quickstart"
+description: "Get a fully local or API-backed voice agent running in minutes with the speech-to-speech CLI."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+Speech to Speech ships a single `speech-to-speech` CLI command that starts the full VAD→STT→LLM→TTS pipeline and, by default, exposes an OpenAI Realtime-compatible WebSocket server on port 8765. The steps below walk from a fresh install to a working voice agent in three steps, then show how to connect a client and explore alternative configurations.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+### Install
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+Install the package from PyPI:
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
+```bash
+pip install speech-to-speech
+```
+
+On Linux, if your CUDA version is not 12.8, pre-install the matching `qwentts-cpp-python` wheel first — see the [Installation guide](/installation) for the exact commands.
+
+### Set your OpenAI API key
+
+The default pipeline routes LLM inference through the OpenAI Responses API. Export your key before launching:
+
+```bash
+export OPENAI_API_KEY=your_key_here
+```
+
+You can also pass it explicitly with `--responses_api_api_key` if you prefer not to set an environment variable.
+
+### Run the pipeline
+
+```bash
+speech-to-speech
+```
+
+That's it. The pipeline starts, loads its models, and listens on `ws://localhost:8765/v1/realtime`. You should see log output as each stage initialises.
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## What the Default Command Does
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+The bare `speech-to-speech` command is equivalent to the following fully-expanded invocation. Every flag shown here is a default; you can override any of them:
+
+```bash
+speech-to-speech \
+    --thresh 0.6 \
+    --stt parakeet-tdt \
+    --llm_backend responses-api \
+    --tts qwen3 \
+    --qwen3_tts_model_name Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+    --qwen3_tts_speaker Aiden \
+    --qwen3_tts_language auto \
+    --qwen3_tts_backend ggml \
+    --qwen3_tts_non_streaming_mode True \
+    --qwen3_tts_mlx_quantization 6bit \
+    --model_name gpt-5.4-mini \
+    --chat_size 30 \
+    --responses_api_stream \
+    --enable_live_transcription \
+    --mode realtime
+```
+
+<Note>
+  The server binds to port **8765** by default and exposes the endpoint at `/v1/realtime`. Connect any OpenAI Realtime-compatible client to `ws://localhost:8765/v1/realtime`. Override the port with `--ws_port` and the bind address with `--ws_host`.
+</Note>
+
+## Alternative Quickstarts
+
+<CodeGroup>
+
+```bash API-backed (default)
+# Uses OpenAI gpt-5.4-mini as the LLM with local Parakeet TDT + Qwen3-TTS
+export OPENAI_API_KEY=your_key_here
+speech-to-speech
+```
+
+```bash Apple Silicon (fully local)
+# Parakeet TDT + MLX LM (Qwen3-4B) + Qwen3-TTS via mlx-audio — no cloud calls
+speech-to-speech --local_mac_optimal_settings
+```
+
+```bash Apple Silicon (specific model)
+# Same as above but with a specific MLX LLM checkpoint
+speech-to-speech \
+    --local_mac_optimal_settings \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+```
+
+```bash Fully local Transformers (CUDA/CPU)
+# Parakeet TDT + local Transformers LLM + Qwen3-TTS — no API required
+speech-to-speech \
+    --mode local \
+    --stt parakeet-tdt \
+    --llm_backend transformers \
+    --tts qwen3 \
+    --model_name Qwen/Qwen3-4B-Instruct-2507 \
+    --enable_live_transcription
+```
+
+</CodeGroup>
+
+## Connect with the OpenAI Realtime Client
+
+Once the server is running in `--mode realtime` (the default), connect to it from Python using the official `openai` package. Because Speech to Speech implements the OpenAI Realtime protocol, no special client code is needed — just point `base_url` at your local server:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8765/v1", api_key="not-needed")
+
+with client.beta.realtime.connect(model="model_name") as conn:
+    conn.session.update(
+        session={
+            "instructions": "You are a helpful assistant.",
+            "turn_detection": {"type": "server_vad", "interrupt_response": True},
+        }
+    )
+
+    # Send audio, receive events, etc.
+    for event in conn:
+        print(event.type)
+```
+
+<Note>
+  The `api_key` value passed to `OpenAI()` is not validated by the Speech to Speech server — any non-empty string works. The actual LLM API key is configured server-side via `OPENAI_API_KEY` or `--responses_api_api_key`.
+</Note>
+
+## Mac Optimal Settings Shortcut
+
+On Apple Silicon, a single flag sets Parakeet TDT for STT, MLX LM for language model inference, Qwen3-TTS via mlx-audio for TTS, and `--device mps` for all models. No API key is required:
+
+```bash
+speech-to-speech --local_mac_optimal_settings
+```
+
+This is equivalent to:
+
+```bash
+speech-to-speech \
+    --mode local \
+    --device mps \
+    --stt parakeet-tdt \
+    --llm_backend mlx-lm \
+    --tts qwen3 \
+    --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+```
+
+<Tip>
+  `--tts pocket` and `--tts kokoro` are also valid TTS choices on macOS when using `--local_mac_optimal_settings`. Override the default TTS with `--tts pocket` or `--tts kokoro` after the flag.
 </Tip>
+
+## Next Steps
+
+- Explore all CLI flags with `speech-to-speech -h` or browse the [arguments classes](https://github.com/huggingface/speech-to-speech/tree/main/src/speech_to_speech/arguments_classes) in the source.
+- Swap in a self-hosted LLM server by passing `--responses_api_base_url http://localhost:8000/v1` with vLLM or llama.cpp.
+- Use `--language auto` with `--enable_lang_prompt` for automatic multilingual conversation (English, French, Spanish, Chinese, Japanese, Korean).
+- Run a pool of parallel pipelines with `--num_pipelines N` (requires `--mode realtime`) to serve multiple concurrent WebSocket sessions.

@@ -1,0 +1,316 @@
+---
+title: "LLM Handler Arguments: Language Model Config"
+sidebarTitle: "LLM Args"
+description: "All LLM configuration flags organized by backend: shared base args, local transformers/mlx-lm, OpenAI Responses API, and Chat Completions."
+---
+
+The LLM stage is the most compute-intensive and highest-latency component of the pipeline. Four backends are supported, selected via `--llm_backend`. All backends share a set of base arguments for model identity and conversation state; backend-specific tuning flags are namespaced by prefix.
+
+```bash
+# Local Transformers backend
+speech-to-speech --llm_backend transformers --model_name Qwen/Qwen3-4B-Instruct-2507
+
+# MLX (Apple Silicon)
+speech-to-speech --llm_backend mlx-lm --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16
+
+# OpenAI Responses API
+speech-to-speech --llm_backend responses-api --model_name gpt-4o-mini
+
+# Chat Completions
+speech-to-speech --llm_backend chat-completions --model_name Qwen/Qwen3-4B-Instruct-2507 \
+    --responses_api_base_url http://localhost:8000/v1
+```
+
+<Tabs>
+  <Tab title="Shared (all backends)">
+
+    The following fields come from `LanguageModelBaseArguments` and are available regardless of which `--llm_backend` is selected. They carry no prefix.
+
+    <ParamField path="model_name" type="string" default="Qwen/Qwen3-4B-Instruct-2507">
+      The model to load or call. For local backends this is a Hugging Face Hub model ID or local path. For API backends it is the model string sent in the request body (e.g. `gpt-4o-mini`, `deepseek-chat`).
+
+      ```bash
+      speech-to-speech --model_name Qwen/Qwen3-4B-Instruct-2507
+      ```
+    </ParamField>
+
+    <ParamField path="user_role" type="string" default="user">
+      The role label assigned to user turns in the chat template. Change this only if the model's chat template uses a non-standard role name.
+
+      ```bash
+      speech-to-speech --user_role user
+      ```
+    </ParamField>
+
+    <ParamField path="init_chat_role" type="string" default="system">
+      Role label used for the initial system/context message injected at the start of every conversation.
+
+      ```bash
+      speech-to-speech --init_chat_role system
+      ```
+    </ParamField>
+
+    <ParamField path="init_chat_prompt" type="string" default="You are a helpful and friendly AI assistant. You are polite, respectful, and aim to provide concise responses of less than 20 words.">
+      System prompt injected as the first message in every new conversation. Tune this to change the assistant's persona, response style, or domain focus.
+
+      ```bash
+      speech-to-speech --init_chat_prompt "You are a concise voice assistant. Keep answers under 15 words."
+      ```
+    </ParamField>
+
+    <ParamField path="chat_size" type="integer" default="30">
+      Number of assistant–user turn pairs to retain in the rolling conversation window. Older turns are either evicted or summarized depending on `--compact_history`.
+
+      ```bash
+      speech-to-speech --chat_size 20
+      ```
+    </ParamField>
+
+    <ParamField path="stream_batch_sentences" type="integer" default="3">
+      Number of sentences to accumulate before yielding a batch to the TTS handler during streaming. Set to `1` for sentence-by-sentence streaming, which reduces first-audio latency at the cost of potentially more TTS artifacts from very short inputs.
+
+      ```bash
+      speech-to-speech --stream_batch_sentences 1
+      ```
+    </ParamField>
+
+    <ParamField path="enable_lang_prompt" type="boolean" default="false">
+      When `true`, appends an explicit instruction to reply in the detected or specified language (e.g. `Please reply to my message in French.`) after each user turn. Useful for smaller models that do not reliably pick up the target language from context alone.
+
+      ```bash
+      speech-to-speech --enable_lang_prompt
+      ```
+    </ParamField>
+
+    <ParamField path="compact_history" type="boolean" default="true">
+      When `true`, the pipeline summarizes older turns in the background once the conversation exceeds `--chat_size`, instead of synchronously evicting them. This preserves long-range context at the cost of one extra LLM call per compaction cycle.
+
+      ```bash
+      speech-to-speech --compact_history false
+      ```
+    </ParamField>
+
+  </Tab>
+  <Tab title="Transformers / MLX-LM">
+
+    Prefix: `--llm_`  
+    Backend values: `--llm_backend transformers` or `--llm_backend mlx-lm`
+
+    `LanguageModelHandlerArguments` extends the shared base and adds device, dtype, VLM support, and generation parameters for local inference.
+
+    <ParamField path="llm_device" type="string" default="cuda">
+      Device to load the model weights onto. Use `mps` for Apple Silicon with the `transformers` backend, or rely on `--local_mac_optimal_settings` to set this automatically. Not used by `mlx-lm` (MLX manages its own devices).
+
+      ```bash
+      speech-to-speech --llm_backend transformers --llm_device cuda
+      ```
+    </ParamField>
+
+    <ParamField path="llm_torch_dtype" type="string" default="float16">
+      PyTorch data type for model weights. One of `float32`, `float16`, or `bfloat16`. `bfloat16` is preferred on Ampere-class and newer NVIDIA GPUs.
+
+      ```bash
+      speech-to-speech --llm_backend transformers --llm_torch_dtype bfloat16
+      ```
+    </ParamField>
+
+    <ParamField path="llm_gen_max_new_tokens" type="integer" default="1024">
+      Maximum number of new tokens to generate per response. Reduce this to hard-cap response length and reduce latency for very verbose models.
+
+      ```bash
+      speech-to-speech --llm_gen_max_new_tokens 512
+      ```
+    </ParamField>
+
+    <ParamField path="llm_gen_min_new_tokens" type="integer" default="0">
+      Minimum number of new tokens to generate. Prevent the model from producing extremely short responses by setting a floor.
+
+      ```bash
+      speech-to-speech --llm_gen_min_new_tokens 5
+      ```
+    </ParamField>
+
+    <ParamField path="llm_gen_temperature" type="float" default="0.0">
+      Sampling temperature. `0.0` produces deterministic (greedy) output. Values above `0.0` introduce randomness. Enable sampling with `--llm_gen_do_sample` when using temperature above `0.0`.
+
+      ```bash
+      speech-to-speech --llm_gen_temperature 0.7 --llm_gen_do_sample
+      ```
+    </ParamField>
+
+    <ParamField path="llm_gen_do_sample" type="boolean" default="false">
+      Whether to use multinomial sampling during generation. Must be `true` when `--llm_gen_temperature` is above `0.0` or any sampling-based parameter is used.
+
+      ```bash
+      speech-to-speech --llm_gen_do_sample --llm_gen_temperature 0.5
+      ```
+    </ParamField>
+
+    <ParamField path="llm_is_vlm" type="boolean" default="false">
+      Set to `true` when loading a Vision Language Model that accepts image inputs. The handler will load `AutoProcessor` and `AutoModelForImageTextToText` instead of the default text-only classes.
+
+      ```bash
+      speech-to-speech --llm_backend transformers --llm_is_vlm \
+          --model_name llava-hf/llava-1.5-7b-hf
+      ```
+    </ParamField>
+
+    ### Example: fully local (Apple Silicon)
+
+    ```bash
+    speech-to-speech \
+        --llm_backend mlx-lm \
+        --model_name mlx-community/Qwen3-4B-Instruct-2507-bf16 \
+        --chat_size 20 \
+        --stream_batch_sentences 1
+    ```
+
+    ### Example: local CUDA
+
+    ```bash
+    speech-to-speech \
+        --llm_backend transformers \
+        --llm_device cuda \
+        --llm_torch_dtype bfloat16 \
+        --model_name Qwen/Qwen3-4B-Instruct-2507 \
+        --llm_gen_max_new_tokens 512
+    ```
+
+  </Tab>
+  <Tab title="Responses API">
+
+    Prefix: `--responses_api_`  
+    Backend value: `--llm_backend responses-api`
+
+    `ResponsesApiLanguageModelHandlerArguments` targets the OpenAI Responses API (`/v1/responses`). Works with OpenAI, Hugging Face Inference Providers, OpenRouter, vLLM, llama.cpp, and any other provider that implements the protocol.
+
+    <ParamField path="model_name" type="string" default="gpt-5.4-mini">
+      Model identifier sent to the API. For OpenAI this is a model name such as `gpt-4o-mini`; for HF Inference Providers use `{org}/{model}:{provider}` syntax (e.g. `Qwen/Qwen3.5-9B:together`).
+
+      ```bash
+      speech-to-speech --llm_backend responses-api --model_name gpt-4o-mini
+      ```
+    </ParamField>
+
+    <ParamField path="responses_api_api_key" type="string">
+      API key for authentication. When unset, the handler falls back to the `OPENAI_API_KEY` environment variable.
+
+      ```bash
+      speech-to-speech --llm_backend responses-api \
+          --responses_api_api_key sk-...
+      ```
+    </ParamField>
+
+    <ParamField path="responses_api_base_url" type="string">
+      Base URL for the OpenAI-compatible endpoint. Omit for OpenAI's default endpoint. Set to your provider's URL for third-party services.
+
+      | Provider | URL |
+      |---|---|
+      | HF Inference Providers | `https://router.huggingface.co/v1` |
+      | OpenRouter | `https://openrouter.ai/api/v1` |
+      | vLLM (local) | `http://localhost:8000/v1` |
+      | llama.cpp (local) | `http://localhost:8080/v1` |
+
+      ```bash
+      speech-to-speech --llm_backend responses-api \
+          --responses_api_base_url https://router.huggingface.co/v1 \
+          --responses_api_api_key "$HF_TOKEN"
+      ```
+    </ParamField>
+
+    <ParamField path="responses_api_stream" type="boolean" default="true">
+      Whether to request streaming token delivery from the API. Keep `true` for low-latency voice pipelines; the TTS handler begins synthesis as soon as the first tokens arrive.
+
+      ```bash
+      speech-to-speech --llm_backend responses-api --responses_api_stream
+      ```
+    </ParamField>
+
+    <ParamField path="responses_api_disable_thinking" type="boolean" default="true">
+      Disable provider-side chain-of-thought reasoning when supported. For Together-hosted Qwen3.5 models this sends `chat_template_kwargs.enable_thinking=false`, which eliminates reasoning tokens and reduces latency.
+
+      ```bash
+      speech-to-speech --llm_backend responses-api --responses_api_disable_thinking
+      ```
+    </ParamField>
+
+    ### Example: OpenAI
+
+    ```bash
+    export OPENAI_API_KEY=sk-...
+    speech-to-speech \
+        --llm_backend responses-api \
+        --model_name gpt-4o-mini \
+        --responses_api_stream
+    ```
+
+    ### Example: HF Inference Providers (Together)
+
+    ```bash
+    speech-to-speech \
+        --llm_backend responses-api \
+        --model_name "Qwen/Qwen3.5-9B:together" \
+        --responses_api_base_url https://router.huggingface.co/v1 \
+        --responses_api_api_key "$HF_TOKEN" \
+        --responses_api_stream
+    ```
+
+  </Tab>
+  <Tab title="Chat Completions">
+
+    Prefix: `--responses_api_`  
+    Backend value: `--llm_backend chat-completions`
+
+    `ChatCompletionsLanguageModelHandlerArguments` extends `ResponsesApiLanguageModelHandlerArguments` and targets `/v1/chat/completions` instead of `/v1/responses`. It inherits all `--responses_api_*` connection flags and adds one Chat-Completions-only knob.
+
+    Use this backend instead of `responses-api` when:
+    - The provider ignores `chat_template_kwargs.enable_thinking` on the Responses path and needs a `reasoning_effort` knob.
+    - The server's Responses streaming tool-call path is unreliable (some vLLM builds), while its Chat Completions tool-call streaming is solid.
+
+    All `--responses_api_*` flags from the Responses API tab apply here as well.
+
+    <ParamField path="responses_api_reasoning_effort" type="string">
+      Provider-specific reasoning level sent as `extra_body={"reasoning_effort": <value>}` on the Chat Completions request. Use `"none"` or `"low"` to disable reasoning on providers where `chat_template_kwargs.enable_thinking` has no effect. When unset, falls back to the `disable_thinking` behaviour.
+
+      ```bash
+      speech-to-speech --llm_backend chat-completions \
+          --responses_api_reasoning_effort none
+      ```
+    </ParamField>
+
+    ### Example: vLLM with tool calling
+
+    ```bash
+    speech-to-speech \
+        --mode realtime \
+        --llm_backend chat-completions \
+        --model_name "Qwen/Qwen3-4B-Instruct-2507" \
+        --responses_api_base_url http://localhost:8000/v1 \
+        --responses_api_stream
+    ```
+
+    ### Example: Cerebras via HF Router (reasoning disabled)
+
+    ```bash
+    speech-to-speech \
+        --mode realtime \
+        --llm_backend chat-completions \
+        --model_name "google/gemma-4-31B-it:cerebras" \
+        --responses_api_base_url https://router.huggingface.co/v1 \
+        --responses_api_api_key "$HF_TOKEN" \
+        --responses_api_reasoning_effort none \
+        --responses_api_stream
+    ```
+
+  </Tab>
+</Tabs>
+
+## The `gen_kwargs` pattern for LLM
+
+Any generation parameter not listed above can be passed at runtime with the `llm_gen_` prefix:
+
+```bash
+speech-to-speech --llm_gen_temperature 0.7 --llm_gen_top_p 0.9
+```
+
+These are forwarded as kwargs to the underlying `generate()` call and accept any parameter supported by the model's generation config.

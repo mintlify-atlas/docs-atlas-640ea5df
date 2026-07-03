@@ -1,0 +1,172 @@
+---
+title: "Deploy Speech to Speech with Docker"
+sidebarTitle: "Docker"
+description: "Run the speech-to-speech pipeline in a GPU-accelerated Docker container using the official Compose configuration."
+---
+
+The repository ships a `docker-compose.yml` and a matching `Dockerfile` that package the entire pipeline into a GPU-enabled container. The container image is built on top of PyTorch's official CUDA image, exposes the server/client socket ports, and mounts a local directory as a model cache so downloaded weights persist across restarts. This is the recommended path for deploying Speech to Speech on a headless Linux server with an NVIDIA GPU.
+
+## Prerequisites
+
+### NVIDIA Container Toolkit
+
+The container uses NVIDIA GPU passthrough, so you must install the NVIDIA Container Toolkit on the host before running `docker compose up`:
+
+[https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+
+<Warning>
+  Without the NVIDIA Container Toolkit the container will start but GPU acceleration will not be available, and model loading may fail or fall back to CPU.
+</Warning>
+
+## Starting the Container
+
+From the repository root:
+
+```bash
+docker compose up
+```
+
+Docker Compose builds the image on the first run (or when `Dockerfile` changes) and then starts the pipeline container with GPU device `0` reserved.
+
+To rebuild the image explicitly:
+
+```bash
+docker compose up --build
+```
+
+## The `docker-compose.yml` Configuration
+
+```yaml
+services:
+
+  pipeline:
+    build:
+      context: .
+      dockerfile: ${DOCKERFILE:-Dockerfile}
+    command:
+      - python3
+      - s2s_pipeline.py
+      - --recv_host
+      - 0.0.0.0
+      - --send_host
+      - 0.0.0.0
+      - --model_name
+      - microsoft/Phi-3-mini-4k-instruct
+      - --init_chat_role
+      - system
+      - --init_chat_prompt
+      - "You are a helpful assistant"
+      - --stt_compile_mode
+      - reduce-overhead
+    expose:
+      - 12345/tcp
+      - 12346/tcp
+    ports:
+      - 12345:12345/tcp
+      - 12346:12346/tcp
+    volumes:
+      - ./cache/:/root/.cache/
+      - ./s2s_pipeline.py:/usr/src/app/s2s_pipeline.py
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+```
+
+### Key Configuration Points
+
+| Setting | Value | Description |
+|---|---|---|
+| `ports` | `12345:12345`, `12346:12346` | TCP socket ports for audio receive and send (server/client mode) |
+| `volumes` | `./cache/:/root/.cache/` | Persists Hugging Face model weights across container restarts |
+| `volumes` | `./s2s_pipeline.py` | Mounts the pipeline script so you can edit it without rebuilding |
+| `device_ids` | `['0']` | Passes GPU 0 to the container; change to `['1']` for a second GPU |
+| `--stt_compile_mode` | `reduce-overhead` | Enables Torch Compile for Whisper-based STT, reducing per-call overhead |
+
+## The Dockerfile
+
+```dockerfile
+FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-devel
+
+ENV PYTHONUNBUFFERED 1
+ENV PATH="/usr/src/app/.venv/bin:${PATH}"
+
+WORKDIR /usr/src/app
+
+# Install packages
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir uv
+
+COPY pyproject.toml ./
+RUN uv sync --no-install-project --no-dev
+
+COPY . .
+RUN uv sync --no-dev
+```
+
+The base image `pytorch/pytorch:2.4.0-cuda12.1-cudnn9-devel` provides:
+- PyTorch 2.4.0 pre-built for CUDA 12.1 / cuDNN 9
+- The full CUDA developer toolkit (needed by some model extensions at runtime)
+
+Dependencies are installed with `uv` in two steps: first the locked dependencies from `pyproject.toml`, then the project package itself. This layer-caches the heavy dependency install so rebuilds after code changes are fast.
+
+## Connecting a Client
+
+Once the container is running, connect from another machine using `scripts/listen_and_play.py`:
+
+```bash
+python scripts/listen_and_play.py --host <docker-host-IP>
+```
+
+The script connects to port 12345 to stream microphone audio and port 12346 to receive generated speech. See [Server/Client mode](/modes/server-client) for the full client reference.
+
+## Customising the Model and Arguments
+
+Edit the `command` list in `docker-compose.yml` to change the LLM, STT, or TTS:
+
+```yaml
+command:
+  - python3
+  - s2s_pipeline.py
+  - --recv_host
+  - 0.0.0.0
+  - --send_host
+  - 0.0.0.0
+  - --stt
+  - parakeet-tdt
+  - --llm_backend
+  - responses-api
+  - --tts
+  - qwen3
+  - --model_name
+  - gpt-4o-mini
+  - --responses_api_api_key
+  - your-api-key-here
+  - --responses_api_stream
+```
+
+Alternatively, pass environment variables or mount a `.env` file and reference them with `${VAR}` syntax in the compose file.
+
+## Model Cache Volume
+
+The `./cache/` directory on the host is mounted to `/root/.cache/` inside the container, which is where the Hugging Face Hub caches downloaded model weights. Create it before the first run:
+
+```bash
+mkdir -p cache
+docker compose up
+```
+
+On subsequent runs the container finds the cached weights immediately and skips re-downloading.
+
+## ARM64 Support
+
+For NVIDIA Jetson devices and other ARM64 platforms (running L4T / JetPack), use `Dockerfile.arm64` instead:
+
+```bash
+DOCKERFILE=Dockerfile.arm64 docker compose up
+```
+
+`Dockerfile.arm64` is based on `nvcr.io/nvidia/l4t-pytorch:r35.2.1-pth2.0-py3`, which provides PyTorch 2.0 pre-built for the L4T (Linux for Tegra) environment. The rest of the build steps are identical to the standard `Dockerfile`.
